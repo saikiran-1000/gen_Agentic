@@ -1,0 +1,17 @@
+{
+    "train_blob": "dataset",
+    "replace_train_blob": "consumed-dataset",
+    "training_file_storage": "files-in-training",
+    "non_empty_value_percent": 90,
+    "percent_to_train": 90,
+    "coverage_percent": 90,
+    "x_field_input": "Company Code,Vendor Unique Key,Currency",
+    "y_field_input": "GL Code,Cost Code",
+    "numeric_in_x_field": "null",
+    "numeric_in_y_field": "null",
+    "mapping": {
+        "Company Code": "CoraAP__Invoice__r.OU_Company_Code__c",
+        "Vendor Unique Key": "CoraAP__Invoice__r.CoraAP__Vendor__r.CoraAP__Unique_Key__c",
+        "Currency": "CoraAP__Invoice__r.CoraAP__Currency__c"
+    }
+}
