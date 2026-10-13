@@ -1,0 +1,351 @@
+AP Advance Agents - Business Overview 
+
+Purpose 
+
+AP Advance agents are AI-assisted business workflows for Accounts Payable teams. They help review invoice, purchase order, GRN, exception, and buyer-comment information, then return a structured recommendation or summary that downstream AP systems can use. 
+
+At a business level, the agents act like specialist AP assistants: 
+
+One agent matches invoice lines to purchase order lines. 
+
+One agent matches invoice lines to GRN lines. 
+
+One agent summarizes why an invoice is pending and what action is needed. 
+
+One agent reads buyer or approver comments and recommends the next action. 
+
+One agent reviews invoice and PO context and suggests better tagging rules. 
+
+The goal is not to replace AP controls. The goal is to reduce manual effort, make recommendations faster, standardize outputs, and keep decisions auditable. 
+
+How The Agents Function In The Cloud Environment 
+
+The AP Advance solution runs in Microsoft Azure. The main cloud components are: 
+
+Azure Function App: Receives AP requests from the calling system and starts the correct agent workflow. 
+
+Azure Blob Storage: Stores business configuration files, prompt files, rule workbooks, and mapping files used by the agents. 
+
+Azure OpenAI GPT: Reads AP context and generates business reasoning, summaries, recommendations, and matching decisions. 
+
+Azure OpenAI Embeddings: Converts invoice, PO, or GRN text into searchable meaning-based representations so similar items can be compared. 
+
+Force.com or AP system integration: Sends invoice-related input to the cloud and receives the final structured output. 
+
+Monitoring and logging: Captures processing status, failures, and performance for operational support. 
+
+The Azure Function App is the entry point. When a request arrives, it checks the `useCaseName` value and routes the request to the right workflow. 
+
+Examples: 
+
+`Invoice Tagging` routes to the invoice-to-PO matching workflow. 
+
+`GRN Tagging` routes to the invoice-to-GRN matching workflow. 
+
+`Invoice Summarisation` routes to the invoice summary workflow. 
+
+`Buyer Instructions` routes to the buyer-comment action workflow. 
+
+`Tagging Rule Enhancements` routes to the rule recommendation workflow. 
+
+Each workflow has an orchestrator. The orchestrator is like a process manager: it decides which agent or processing step should run first, what information is passed to the next step, and how the final response should be prepared. 
+
+End-To-End Workflow 
+
+1. Input Is Received In The Cloud 
+
+The AP system sends a request to the Azure Function App. The request is usually a JSON payload containing AP business data use case wise: 
+
+The request also includes a use case name so the function knows which agent workflow to run. 
+
+2. The Request Is Routed To The Right Agent 
+
+The Azure Function App reads the use case name and selects the correct AP Advance agent. 
+
+For example: 
+
+If the request is for invoice tagging, it starts the invoice tagging orchestrator. 
+
+If the request is for buyer instructions, it starts the buyer instruction orchestrator. 
+
+If the request is for GRN tagging, it starts the GRN orchestrator. 
+
+This routing keeps all AP agent capabilities available through a common cloud entry point while still allowing each agent to follow its own business workflow. 
+
+3. Business Configuration Is Loaded 
+
+Before processing, the workflow loads the required business configuration from Azure Blob Storage. 
+
+This configuration can define: 
+
+Mandatory input fields. 
+
+Field mappings between Force.com/AP system names and AI-ready names. 
+
+Which fields should be compared. 
+
+Matching thresholds. 
+
+Confidence score rules. 
+
+Valid business actions. 
+
+Prompt instructions for GPT. 
+
+Output format expected by downstream systems. 
+
+This is important because business teams can adjust rules, mappings, or prompts without changing the main application code every time. 
+
+4. Input Is Validated And Prepared 
+
+The request handler checks whether the required data is present and usable. 
+
+Examples: 
+
+Invoice tagging checks invoice lines and PO lines. 
+
+GRN tagging checks invoice lines and unmatched GRN lines. 
+
+Invoice summarization checks invoice header, exception, due date, and comment data. 
+
+Buyer instructions checks exception list, comment history, and authorized buyer information. 
+
+The input is then transformed into a standard structure that the AI agent can understand. 
+
+5. Matching, Reasoning, Or Summarization Is Performed 
+
+The exact processing depends on the use case. 
+
+Invoice Tagging 
+
+The agent matches invoice line items to purchase order line items. 
+
+Business flow: 
+
+Check for direct rule-based matches, such as matching product or service numbers. 
+
+For records that are not obvious, compare item descriptions using semantic similarity. 
+
+Ask GPT to reason over the best candidate matches. 
+
+Enforce one invoice line to one PO line where applicable. 
+
+Return the matched PO line, match percentage, and reason. 
+
+Business outcome: 
+
+The AP user receives suggested invoice-to-PO line matches, reducing manual line tagging work. 
+
+GRN Tagging 
+
+The agent matches invoice line items to unmatched GRN line items. 
+
+Business flow: 
+
+Compare invoice line descriptions with GRN line descriptions. 
+
+Use delivery note, BOL, UOM, quantity, and PO line context where configured. 
+
+Ask GPT to reason over the most likely GRN candidates. 
+
+Apply validations and confidence scoring. 
+
+Return matched GRN lines for each invoice line. 
+
+Business outcome: 
+
+The AP user gets recommended GRN matches for invoice lines, helping resolve receipt-related invoice exceptions. 
+
+Invoice Summarization 
+
+The agent creates a short, action-oriented invoice summary. 
+
+Business flow: 
+
+Review invoice header details, exception reasons, line exceptions, due date, vendor details, PO numbers, and comments. 
+
+Identify why the invoice is pending. 
+
+Identify the latest relevant action or instruction from comments. 
+
+Generate a concise summary in the required language. 
+
+Return the summary in the expected AP system format. 
+
+Business outcome: 
+
+The AP user can quickly understand why an invoice is stuck and what needs to be done next. 
+
+Buyer Instructions 
+
+The agent interprets buyer or approver comments and recommends an action. 
+
+Business flow: 
+
+Read the latest buyer or approver comment. 
+
+Compare it with the active invoice exceptions. 
+
+Use the configured exception logic to identify the allowed business action. 
+
+Extract only the relevant entities, such as vendor, PO number, GL account, cost center, amount, line number, or reason. 
+
+Add manual review guidance when information is incomplete. 
+
+Return the recommended action, entities, justification, and confidence score. 
+
+Business outcome: 
+
+The AP system receives a structured action recommendation instead of a free-text comment, making exception handling faster and more consistent. 
+
+Tagging Rule Enhancements 
+
+The agent suggests improved tagging rules based on invoice and PO data. 
+
+Business flow: 
+
+Load existing tagging rules from a workbook. 
+
+Compare the invoice line with related PO lines. 
+
+Decide whether a rule-based, AI-based, manual, or insufficient-data approach is more suitable. 
+
+Return the suggested rule, confidence, reasoning, and fields considered. 
+
+Business outcome: 
+
+The AP team can improve future automation rules based on real matching scenarios. 
+
+6. Confidence And Validation Are Applied 
+
+Some workflows calculate confidence scores. These scores help business users and downstream systems decide whether a recommendation can be accepted automatically or should go to manual review. 
+
+Confidence may consider: 
+
+Text similarity between records. 
+
+GPT reasoning output. 
+
+Exact field matches. 
+
+Configured business weights. 
+
+Validation results from the AP system or Force.com. 
+
+Low-confidence or incomplete results can be routed for manual review instead of being auto-applied. 
+
+7. Output Is Generated 
+
+After processing, the response handler converts the internal AI result back into the structure expected by the calling AP system. 
+
+The output can include: 
+
+Matched PO line. 
+
+Matched GRN line. 
+
+Match percentage. 
+
+Recommended action. 
+
+Extracted business entities. 
+
+Manual review guidance. 
+
+Invoice summary. 
+
+Suggested tagging rule. 
+
+Confidence score. 
+
+Business reasoning or justification. 
+
+The response is returned by the Azure Function App as structured JSON. This allows Force.com or another AP platform to consume it directly. 
+
+How Microsoft Azure OpenAI GPT Works In This Solution 
+
+Microsoft Azure OpenAI GPT is the AI reasoning engine used by the AP Advance agents. It is hosted inside Azure as an enterprise service. 
+
+In this solution, GPT is not used as a general chatbot. It is used as a controlled business reasoning component. 
+
+The system sends GPT: 
+
+The relevant invoice, PO, GRN, exception, or comment data. 
+
+Business instructions from prompt files. 
+
+Allowed actions, rules, and expected output format. 
+
+Candidate matches selected by the retrieval process. 
+
+GPT then returns a structured business answer, such as: 
+
+"This invoice line best matches this PO line." 
+
+"This buyer comment means update the GL account for these invoice lines." 
+
+"This invoice is pending because of coding missing, and the required action is to confirm COA coding." 
+
+"This case should use AI-based tagging because the available fields are not enough for a deterministic rule." 
+
+The Azure OpenAI deployment shown in the environment/screenshot context represents the model endpoint used by the application. In simple terms: 
+
+Endpoint is the Azure OpenAI service address. 
+
+API key allows the application to securely call that service. 
+
+API version controls which Azure OpenAI API behavior is used. 
+
+Deployment name is the model deployment selected for the workflow, such as `gpt-5-mini`. 
+
+Embedding deployment is used for meaning-based search, such as comparing invoice descriptions with PO or GRN descriptions. 
+
+For business users, the key point is this: 
+
+GPT reads the AP context, follows the configured business instructions, and produces a structured recommendation. It does not independently update invoices unless the downstream AP system chooses to consume and apply the response. 
+
+Simple Business Flow Diagram 
+
+AP System / Force.com 
+        | 
+        | Sends invoice, PO, GRN, exception, or comment data 
+        v 
+Azure Function App 
+        | 
+        | Selects the correct use case 
+        v 
+AP Advance Orchestrator 
+        | 
+        | Loads business rules, prompts, and mappings 
+        v 
+Specialized Agents 
+        | 
+        | Validate data, compare records, ask Azure OpenAI GPT, score confidence 
+        v 
+Response Handler 
+        | 
+        | Converts result into AP-system format 
+        v 
+AP System / Force.com 
+        | 
+        | Displays recommendation, summary, match, or action 
+        v 
+Business User Review / Auto Processing 
+
+Business Controls 
+
+The solution includes several controls to keep recommendations reliable: 
+
+Uses configured business rules and allowed actions. 
+
+Validates mandatory input fields. 
+
+Returns structured outputs instead of open-ended text. 
+
+Provides confidence scores for decision support. 
+
+Gives manual review guidance when data is missing or unclear. 
+
+Can validate certain matches against Force.com where enabled. 
+
+Keeps prompts and rules in storage so they can be governed centrally. 
