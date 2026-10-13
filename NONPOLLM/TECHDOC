@@ -1,0 +1,891 @@
+GL Code & Cost Code Prediction System - Technical Documentation
+Use Case: Automated GL Code and Cost Code Tagging for Non-PO Invoice Approval
+
+1. Executive Summary
+1.1 Business Problem
+In enterprise procurement and accounts payable operations, invoices that lack a Purchase Order (PO) reference present a unique challenge. Approvers need to:
+
+Assign appropriate General Ledger (GL) Codes for proper financial classification
+Assign Cost Centre (CC) Codes for budget allocation
+Make decisions quickly without slowing down the approval workflow
+Maintain consistency in coding decisions across similar invoices
+Manual assignment is time-consuming, error-prone, and lacks the ability to leverage historical patterns effectively. This leads to inconsistent coding, delayed approvals, and potential compliance issues.
+
+1.2 Solution Overview
+The GL Code & Cost Code Prediction System is an AI-powered Azure Function that automatically analyzes invoice line items and predicts the most appropriate GL Code and Cost Centre based on historical data and LLM-based reasoning.
+
+Technique	Purpose
+Azure AI Search (Vector Search)	Retrieves semantically similar historical line descriptions
+LLM-Based GL Category Identification	Uses Azure OpenAI to identify relevant GL categories for new line descriptions
+LLM-Based Line Description Matching	Matches ambiguous lines to the most relevant historical line description
+Frequency & Recency Algorithm	Calculates confidence scores based on historical usage patterns
+Parallel Processing	Processes multiple line items concurrently for performance
+1.3 Key Capabilities
+Multi-Stage LLM Pipeline: Two-stage LLM processing for category identification and line matching
+Historical Data Analysis: Leverages past invoice coding decisions via Azure AI Search
+Confidence Scoring: Provides confidence percentages using frequency, recency, and semantic similarity scores
+Approver-Aware CC Prediction: Filters Cost Centre predictions based on the current approver's historical coding patterns
+Parallel Processing: Uses ThreadPoolExecutor for concurrent line item processing
+Dynamic Configuration: All field mappings, prompts, and parameters are configurable via Azure Blob Storage
+Master Data Integration: Supports GL category master data with explanations
+Low Confidence Detection: Flags predictions based on newly created GL categories
+2. System Architecture
+2.1 High-Level Architecture
+AI Services
+
+Processing Pipeline
+
+Data Layer
+
+Azure Functions Layer
+
+Client Layer
+
+POST /nonpocoding-llm
+
+JSON Response
+
+HTTP 200
+
+Auto Upload
+
+Client Application / ERP System
+
+Azure Function App
+(HTTP Trigger: /nonpocoding-llm)
+
+Azure Blob Storage
+(nonpoconfig/config.json)
+
+Azure Blob Storage
+(GL Master Data CSV/XLSX)
+
+Azure Blob Storage
+(historicaldata/*.csv)
+
+Azure AI Search
+(Vector Index)
+
+Master Data Fetch
+(unique_gl_Cat_add.py)
+
+Parallel Processing 1
+(GL Category Identification)
+
+Historical Matching
+(GLCat_to_LineDesc.py)
+
+Parallel Processing 2
+(Line Description Match)
+
+GL/CC Prediction
+(gl_cc_logic.py)
+
+Azure OpenAI
+(o3-mini/GPT Models)
+
+Azure OpenAI
+(Embeddings Model)
+
+2.2 Data Flow Diagram
+Stage 4: GL/CC Prediction
+
+Stage 3: Historical Match
+
+Stage 2: GL Category ID
+
+Stage 1: Master Data
+
+Input
+
+Direct Match
+
+Ambiguous
+
+Invoice Request
+
+Invoice Header
+
+Invoice Line Items
+
+Fetch GL Master Categories
+
+Add to Request
+
+Split by Line Item
+
+LLM: Identify GL Categories
+
+LLM: Identify GL Categories
+
+LLM: Identify GL Categories
+
+Merge Results
+
+Fetch Historical Data from AI Search
+
+Decision Logic
+
+Non-LLM Lines
+
+LLM Line Matching
+
+Apply Freq/Recency Algorithm
+
+Final Response
+
+2.3 Technology Stack
+Layer	Technology	Purpose
+Runtime	Azure Functions (Python 3.12)	Serverless HTTP endpoint
+LLM	Azure OpenAI	GL category identification & line matching
+Embeddings	Azure OpenAI Embeddings	Semantic similarity for historical search
+Vector Search	Azure AI Search	Historical data retrieval with vector search
+Configuration	Azure Blob Storage	Dynamic config and master data management
+Validation	Pydantic 2.x	Schema validation & type safety
+Data Processing	Pandas, NumPy	Statistical computations & data manipulation
+Concurrency	ThreadPoolExecutor	Parallel line item processing
+3. Component Deep Dive
+3.1 Function App Entry Point
+File: function_app.py
+
+The main HTTP trigger that orchestrates the complete request lifecycle through multiple processing stages.
+
+FunctionApp
+
+-config: dict
+
+-blob_service_client: BlobServiceClient
+
++nonPOLLM2(req: HttpRequest) : HttpResponse
+
++fetch_config(container, blob) : dict
+
++get_blob_service_client(conn_str) : BlobServiceClient
+
++remap_keys(data, mapping) : dict
+
++dedupe_by_score(data) : list
+
+Key Responsibilities:
+
+Fetch configuration from Azure Blob Storage at startup
+Validate incoming HTTP POST requests
+Orchestrate the multi-stage processing pipeline:
+Master Data Stage: Fetch unique GL categories
+LLM Stage 1: Identify GL categories per line item (parallel)
+Historical Matching Stage: Fetch and match historical data
+LLM Stage 2: Match ambiguous lines to historical descriptions (parallel)
+GL/CC Prediction Stage: Calculate predictions with confidence scores
+Deduplicate results by confidence score
+Handle errors and return structured responses
+3.2 Master Data Module
+File: unique_gl_Cat_add.py
+
+Fetches unique GL categories from Azure AI Search for vendor-specific filtering.
+
+Key Functions:
+
+Function	Purpose
+unique_GL_Categories_addition()	Main entry point to fetch and add GL categories to request
+Process Flow:
+
+Extract vendor ID from request
+Query Azure AI Search with vendor filter
+Use faceting to get unique GL descriptions
+Append to request as masterGLCategories
+Call main_gl_master() to enrich with explanations
+3.3 GL Master Data Module
+File: recent_gl_categories.py
+
+Manages GL master data from Azure Blob Storage and identifies newly created categories.
+
+Key Functions:
+
+Function	Purpose
+main_gl_master()	Main pipeline for master data enrichment
+get_or_create_container()	Fetch or create blob container with CSV/XLSX
+fetch_filtered_rows()	Get unique GL categories from master data
+fetch_last_n_days()	Identify newly created GL categories (last N days)
+add_historical_data()	Merge GL categories with request
+validation_check()	Validate config requirements
+Output Structure:
+
+{
+  "status": "success",
+  "data": { /* enriched request with masterGLCategories */ },
+  "newCategories": ["New Category 1", "New Category 2"],
+  "glDesc_info": {
+    "GL Category Name": ["GL001", "GL002"]
+  }
+}
+3.4 Parallel Processing Modules
+Files: parallel_call.py, parallel_call2.py
+
+Handles concurrent processing of multiple invoice line items for improved performance.
+
+Key Functions:
+
+Function	Purpose
+invline_to_inv()	Splits single invoice into multiple single-line invoices
+process_invoices_in_parallel()	Processes line items using ThreadPoolExecutor
+merge_invoices()	Combines processed results back into single invoice
+main_parallel()	Main pipeline orchestrator for LLM Stage 1
+main_parallel2()	Main pipeline orchestrator for LLM Stage 2
+Parallel Processing Flow:
+
+Invoice with N Line Items
+
+Split into N Invoices
+(1 line each)
+
+ThreadPoolExecutor
+(max_workers = min(batch_size, CPU*10))
+
+Process Invoice 1
+
+Process Invoice 2
+
+Process Invoice N
+
+Merge Results
+
+Single Response with N Results
+
+3.5 GL Categories Identification Module
+Directory: gl_categories_identification/
+
+Identifies relevant GL categories for each line description using LLM reasoning.
+
+3.5.1 Main Orchestrator
+File: gl_categories_main.py
+
+def gl_categories_main(input_data, config) -> Dict[str, Any]:
+    """
+    Orchestrates:
+    1. Input validation
+    2. LLM-based GL category identification
+    3. Output validation
+    """
+3.5.2 Input Validation
+File: gl_categories_input_validation.py
+
+Dynamically creates Pydantic models based on configuration for schema validation.
+
+Validated Fields:
+
+invoiceID, invoiceDate, vendorID, approverName
+masterGLCategories (list of GL categories with explanations)
+invoiceLineItems (list with invoiceLineID and lineDescription)
+3.5.3 Invoice Processing
+File: gl_categories_process_invoice.py
+
+Key Functions:
+
+Function	Purpose
+process_master_data()	Converts GL categories to dict mapping
+process_invoice()	Calls LLM for each line item to identify GL categories
+LLM Input:
+
+Line description
+All available GL categories with their explanations
+LLM Output:
+
+{
+  "glCategories": ["Service Agreements", "IT Services"]
+}
+3.5.4 LLM Integration
+File: gl_categories_llm_call.py
+
+API Configuration:
+
+Parameter	Value
+Max Completion Tokens	4000
+Reasoning Effort	Configurable (model_type_for_llm1)
+Environment Variables Required:
+
+AZURE_OPENAI_ENDPOINT_glcat
+AZURE_OPENAI_API_KEY_glcat
+AZURE_OPENAI_API_VERSION_glcat
+AZURE_OPENAI_MODEL_glcat
+3.6 Historical Data Matching Module
+File: GLCat_to_LineDesc.py
+
+Core module that fetches historical data from Azure AI Search and determines processing paths.
+
+Key Functions:
+
+Function	Purpose
+GLcat_to_lineDesc()	Main orchestrator for historical matching
+fetch_historical_data_for_invoice_line()	Vector search for similar historical records
+transform_input_data()	Transform keys based on mapping
+rearrange_historical_data()	Group records by GL category
+Decision Logic:
+
+0
+
+1
+
+2+
+
+No
+
+Yes
+
+Yes
+
+No
+
+0
+
+1
+
+2+
+
+Yes
+
+No
+
+Line Item with GL Categories
+
+Number of
+GL Categories?
+
+No GL Categories
+Return NA
+
+Has Historical
+Data?
+
+Number of GL Cats
+with History?
+
+Single GL Code
+in Master?
+
+Direct Prediction
+(Non-LLM)
+
+Return GL Code
+with Low Confidence
+
+Return NA
+
+Return NA
+
+Direct Prediction
+(Non-LLM)
+
+Exact Match
+Found?
+
+Direct Prediction
+(Non-LLM)
+
+Send to LLM Stage 2
+(Line Description Match)
+
+Non-LLM Lines
+
+LLM Lines
+
+Vector Search Configuration:
+
+Uses Azure OpenAI embeddings for semantic similarity
+Pre-filters by vendor, GL category, and other fields
+Retrieves top N records based on cosine similarity score
+3.7 Line Description Matching Module
+Directory: line_description_matching/
+
+Matches ambiguous line items to the most relevant historical line description using LLM.
+
+3.7.1 Main Orchestrator
+File: line_desc_match_main.py
+
+def line_desc_match_main(input_data, config) -> Dict[str, Any]:
+    """
+    Orchestrates:
+    1. Input validation
+    2. LLM-based line description matching
+    3. Output validation
+    """
+3.7.2 Invoice Processing
+File: line_desc_match_process_invoice.py
+
+Key Functions:
+
+Function	Purpose
+preprocess_invoice()	Structures data for LLM consumption
+process_invoice()	Calls LLM to find best matching historical description
+LLM Input:
+
+{
+  "line_description": "Monthly IT Support Services",
+  "historicallyMatchedLineDescriptions": [
+    {
+      "glCategory": "IT Services",
+      "glCategoryExplanation": "Technology and IT related expenses",
+      "lineDescriptions": ["IT Support Contract", "Monthly Tech Support"]
+    }
+  ]
+}
+LLM Output:
+
+{
+  "match": "IT Support Contract"
+}
+3.8 GL/CC Prediction Module
+File: gl_cc_logic.py
+
+Core prediction engine that calculates GL Code and Cost Centre with confidence scores.
+
+Key Functions:
+
+Function	Purpose
+main_gl_cc_predict()	Main pipeline for GL/CC prediction
+_parse_date()	Parse dates in various formats
+_update_freq_and_recency()	Update frequency and recency metrics
+_finalize_group()	Calculate final scores and normalize
+_pick_best()	Select best prediction with confidence
+Confidence Score Formula:
+
+confidence = (w_score × max_score) + (w_freq × freq) + (w_recency × recency)
+
+Where:
+- max_score: Highest semantic similarity score from vector search
+- freq: 1 - e^(-k_f × count)  (exponential frequency calculation)
+- recency: Σ e^(-λ × days)    (exponential decay based on days since invoice)
+Grouping Logic:
+
+Prediction Type	Grouping Logic
+GL Code	Group by GL code across all matching historical records
+Cost Centre	Group by CC code, filtered by current approver's history
+Prediction Modes:
+
+"both" - Predict both GL and CC (default)
+"gl_only" - Predict only GL Code
+"cc_only" - Predict only Cost Centre
+Split Prediction Logic: When approver filter removes all CC data but GL data exists:
+
+Get CC codes from pre-match data (all candidates)
+Get GL codes from post-match data (LLM-matched only)
+Merge results
+3.9 Auto Upload Module
+File: auto_upload.py
+
+Handles automatic upload of historical CSV data to Azure AI Search with vector embeddings.
+
+Key Functions:
+
+Function	Purpose
+main_data_upload()	Main ETL pipeline orchestrator
+fetch_and_merge_csvs()	Download and merge CSVs from blob storage
+clean_dataframe()	Filter and clean data based on config
+ensure_index_exists()	Create Azure AI Search index if needed
+get_existing_keys()	Fetch existing document IDs to avoid duplicates
+process_batches()	Batch processing with embedding generation
+archive_processed_blobs()	Move processed CSVs to archive container
+ETL Pipeline:
+
+Blob Storage
+historicaldata/*.csv
+
+Merge CSVs
+
+Clean Data
+
+Create Index
+If Not Exists
+
+Get Existing Keys
+
+Batch Process
+100 rows/batch
+
+Generate Embeddings
+
+Upload to
+Azure AI Search
+
+Archive CSVs to
+consumedhistoricaldata
+
+4. Process Flow & Sequence Diagrams
+4.1 Complete Request Lifecycle
+GL/CC Predict
+LLM (Line Match)
+LLM (GL Categories)
+Azure AI Search
+Blob Storage
+Azure Function
+Client
+GL/CC Predict
+LLM (Line Match)
+LLM (GL Categories)
+Azure AI Search
+Blob Storage
+Azure Function
+Client
+Load Configuration
+Auto Upload Historical Data
+Stage 1: Master Data
+Stage 2: GL Category Identification
+par
+[Process Line 1]
+[Process Line 2]
+Stage 3: Historical Matching
+Stage 4: Line Description Match (if needed)
+par
+[LLM Lines only]
+Stage 5: GL/CC Prediction
+Merge & Dedupe
+POST /nonpocoding-llm
+Fetch config.json
+Configuration
+Fetch historicaldata/*.csv
+Upload with Embeddings
+Get unique GL categories (faceted)
+Fetch GL Master CSV/XLSX
+masterGLCategories with explanations
+Identify GL Categories
+glCategories[]
+Identify GL Categories
+glCategories[]
+Vector Search (per line)
+Historical Records with scores
+Decision Logic (Direct vs LLM)
+Match to historical description
+matchingLineDescription
+Predict(non_llm_lines)
+GL/CC with confidence
+Predict(llm_lines)
+GL/CC with confidence
+Merge all results
+Dedupe by score
+HTTP 200 + JSON Response
+5. API Reference
+5.1 Request Schema
+{
+  "key": "INV-2025-001",
+  "Invoice_Date__c": "2025-01-15",
+  "AP_Vendor_Code__c": "V0001",
+  "Approver_Name__c": "John Smith",
+  "Invoice_Line_Item__c": [
+    {
+      "ID": "LINE-001",
+      "Line_Description__c": "Monthly IT Support Services",
+      "Line_Amount__c": "5000.00"
+    },
+    {
+      "ID": "LINE-002",
+      "Line_Description__c": "Office Supplies - Q1",
+      "Line_Amount__c": "250.00"
+    }
+  ]
+}
+5.2 Response Schema
+Success (200 OK):
+
+[
+  {
+    "Success": "True",
+    "ID": "LINE-001",
+    "GL Code": {
+      "field_value": "6101001",
+      "confidence_score": 85.5
+    },
+    "Cost Code": {
+      "field_value": "CC-IT-001",
+      "confidence_score": 72.3
+    }
+  },
+  {
+    "Success": "True",
+    "ID": "LINE-002",
+    "GL Code": {
+      "field_value": "6201001",
+      "confidence_score": 91.2
+    },
+    "Cost Code": {
+      "field_value": "CC-ADMIN-001",
+      "confidence_score": 88.0
+    }
+  }
+]
+Error Response (400/500):
+
+{
+  "status": "error",
+  "status_code": 500,
+  "message": "Issue in LLM callout: Azure OpenAI API error..."
+}
+5.3 Field Mapping Reference
+Request Field	Internal Field	Description
+key	invoiceID	Unique invoice identifier
+Invoice_Date__c	invoiceDate	Invoice date (YYYY-MM-DD)
+AP_Vendor_Code__c	vendorID	Vendor identifier
+Approver_Name__c	approverName	Approver name for CC filtering
+Invoice_Line_Item__c	invoiceLineItems	Array of line items
+ID	invoiceLineID	Line item identifier
+Line_Description__c	lineDescription	Line item description
+6. Configuration Guide
+6.1 Configuration File (config.json)
+The configuration is stored in Azure Blob Storage at nonpoconfig/config.json.
+
+{
+  "LLM_to_salesforce_key_mapping": {
+    "invoiceID": "key",
+    "invoiceDate": "Invoice_Date__c",
+    "vendorID": "AP_Vendor_Code__c",
+    "approverName": "Approver_Name__c",
+    "invoiceLineItems": "Invoice_Line_Item__c",
+    "invoiceLineID": "ID",
+    "lineDescription": "Line_Description__c",
+    "glCategory": "glCategory",
+    "glCategoryExplanation": "glCategoryExplanation",
+    "glMaster": "masterGLCategories"
+  },
+  
+  "input_data_field_mapping": {
+    "vendorid": "AP_Vendor_Code__c",
+    "invls_detail": "Invoice_Line_Item__c",
+    "invline_identifier": "ID",
+    "line_desc": "Line_Description__c"
+  },
+  
+  "batch_size_for_parallel_call": 10,
+  "batch_size2_for_parallel_call": 10,
+  
+  "inv_line_detail_identifier": "Invoice_Line_Item__c",
+  "field_name_for_invoice_line_id": "ID",
+  "invoicedate_field_in_header": "Invoice_Date__c",
+  "approverName_field_in_header": "Approver_Name__c",
+  
+  "filter_by_vendorId": "yes",
+  "index_name": "nonpo-historical-index",
+  
+  "azure_ai_search_column_mapping": {
+    "vendorid": "vendorId",
+    "gl_desc": "GLDescriptions"
+  },
+  
+  "AzureAIConfig": {
+    "index_name": "nonpo-historical-index",
+    "key_field": "id",
+    "searchable": ["lineDescription"],
+    "filterable": ["vendorId", "GLDescriptions", "approverName"],
+    "facetable": ["GLDescriptions"],
+    "retrievable": ["id", "lineDescription", "GLCode", "CostCentre", "GLDescriptions", "invoiceDate", "approverName"],
+    "relevant_fields": ["id", "lineDescription", "GLCode", "CostCentre", "GLDescriptions", "invoiceDate", "approverName", "vendorId"],
+    "vector_fields": {
+      "embeddings": {
+        "dimensions": 1536
+      }
+    }
+  },
+  
+  "historical_data_filter_and_retrieval": {
+    "input_data_to_historical_data_field_mapping": {
+      "header": {
+        "AP_Vendor_Code__c": "vendorId"
+      },
+      "line_detail": {
+        "Line_Description__c": "lineDescription"
+      }
+    },
+    "apply_filter_on_this_fields": {
+      "header": ["AP_Vendor_Code__c"],
+      "line_detail": ["Line_Description__c"],
+      "llm_callout": "GLDescriptions"
+    },
+    "No_of_lineDescription_extract_from_historical_data": 100,
+    "GLCode_field_name_in_historical_data": "GLCode"
+  },
+  
+  "GLmasterdata_field_mapping": {
+    "glMaster_container_name": "glmasterdata",
+    "gl_code": "GLCode",
+    "glCategory": "GLDescriptions",
+    "glCategoryExplanation": "GLCatExplanation",
+    "gl_desc_created_date": "CreatedDate",
+    "days": 30
+  },
+  
+  "invoicedate_field_in_invl_in_database": "invoiceDate",
+  "GLCode_column_name_in_database": "GLCode",
+  "CostCentre_column_name_in_database": "CostCentre",
+  "Approver_column_name_in_database": "approverName",
+  
+  "recency_weight": 0.3,
+  "frequency_weight": 0.2,
+  "lambda_decay": 0.01,
+  "recent_count": 5,
+  "how_many_recent_gl_to_consider": 3,
+  "k_f_coefficient_for_frequency_calculation": 0.03,
+  "confidence_threshold": 50,
+  
+  "weightage_for_confidence_score_calculation_gl": {
+    "score": 0.5,
+    "w_freq": 0.2,
+    "w_recency": 0.3
+  },
+  "weightage_for_confidence_score_calculation_cc": {
+    "score": 0.4,
+    "w_freq": 0.3,
+    "w_recency": 0.3
+  },
+  
+  "model_type_for_llm1": "medium",
+  
+  "gl_categories_system_prompt": "<Your system prompt for GL category identification>",
+  "gl_categories_user_prompt": "Given the line description: {lineDescription}\n\nAvailable GL Categories:\n{GL_category_description}\n\nIdentify all applicable GL categories.",
+  
+  "line_desc_match_system_prompt": "<Your system prompt for line description matching>",
+  "line_desc_match_user_prompt": "Input: {input_data}\n\nSelect the single best matching historical line description."
+}
+6.2 Parameter Reference
+Confidence Score Parameters
+Parameter	Type	Description
+recency_weight	float	Weight for recency in legacy calculation
+frequency_weight	float	Weight for frequency in legacy calculation
+lambda_decay	float	Decay factor for exponential recency (default: 0.01)
+recent_count	int	Number of recent occurrences to consider for recency
+how_many_recent_gl_to_consider	int	Top N codes to retain recency scores
+k_f_coefficient_for_frequency_calculation	float	Coefficient for exponential frequency (default: 0.03)
+confidence_threshold	float	Threshold for low confidence flagging
+GL/CC Weightage Configuration
+Parameter	Type	Description
+weightage_for_confidence_score_calculation_gl.score	float	Weight for semantic similarity score (GL)
+weightage_for_confidence_score_calculation_gl.w_freq	float	Weight for frequency (GL)
+weightage_for_confidence_score_calculation_gl.w_recency	float	Weight for recency (GL)
+weightage_for_confidence_score_calculation_cc.score	float	Weight for semantic similarity score (CC)
+weightage_for_confidence_score_calculation_cc.w_freq	float	Weight for frequency (CC)
+weightage_for_confidence_score_calculation_cc.w_recency	float	Weight for recency (CC)
+Azure AI Search Parameters
+Parameter	Type	Description
+index_name	string	Azure AI Search index name
+key_field	string	Unique identifier field in index
+searchable	array	Fields enabled for full-text/vector search
+filterable	array	Fields enabled for filtering
+facetable	array	Fields enabled for faceting
+retrievable	array	Fields returned in search results
+vector_fields	object	Vector field configuration with dimensions
+LLM Parameters
+Parameter	Type	Description
+model_type_for_llm1	string	Reasoning effort for LLM1 (low/medium/high)
+gl_categories_system_prompt	string	System prompt for GL category identification
+gl_categories_user_prompt	string	User prompt template with placeholders
+line_desc_match_system_prompt	string	System prompt for line matching
+line_desc_match_user_prompt	string	User prompt template for line matching
+7. Installation & Setup
+7.1 Local Development Setup
+# 1. Clone repository
+git clone <repo-url>
+cd nonpollm2_parallel
+
+# 2. Create virtual environment
+python -m venv .venv
+
+# 3. Activate virtual environment
+# Windows:
+.venv\Scripts\activate
+# Linux/Mac:
+source .venv/bin/activate
+
+# 4. Install dependencies
+pip install -r requirements.txt
+
+# 5. Create local.settings.json (see section 7.4)
+
+# 6. Run locally
+func host start
+7.2 Dependencies
+File: requirements.txt
+
+azure-functions
+pyodbc==5.2.0
+azure-storage-blob==12.3.0
+openai==1.108.0
+pydantic==2.11.9
+pandas==2.3.2
+numpy==2.2.6
+azure-search-documents==11.6.0
+azure-core==1.30.2
+requests==2.32.3
+openpyxl==3.1.5
+7.4 Environment Variables
+Create local.settings.json for local development:
+
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "<your-blob-connection-string>",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    
+    "endpoint": "https://<your-search-service>.search.windows.net",
+    "admin_key": "<your-search-admin-key>",
+    
+    "AZURE_OPENAI_ENDPOINT_glcat": "https://<your-openai-resource>.openai.azure.com/",
+    "AZURE_OPENAI_API_KEY_glcat": "<your-api-key>",
+    "AZURE_OPENAI_API_VERSION_glcat": "2024-02-15-preview",
+    "AZURE_OPENAI_MODEL_glcat": "<your-deployment-name>",
+    
+    "AZURE_OPENAI_ENDPOINT_linedesc": "https://<your-openai-resource>.openai.azure.com/",
+    "AZURE_OPENAI_API_KEY_linedesc": "<your-api-key>",
+    "AZURE_OPENAI_API_VERSION_linedesc": "2024-02-15-preview",
+    "AZURE_OPENAI_MODEL_linedesc": "<your-deployment-name>",
+    
+    "AZURE_OPENAI_ENDPOINT_embd": "https://<your-openai-resource>.openai.azure.com/",
+    "AZURE_OPENAI_API_KEY_embd": "<your-api-key>",
+    "AZURE_OPENAI_API_VERSION_embd": "2024-02-15-preview",
+    "AZURE_OPENAI_MODEL_embed": "text-embedding-ada-002"
+  }
+}
+7.5 Azure Blob Storage Setup
+Create the following containers:
+
+Container Name	Purpose
+nonpoconfig	Configuration files (config.json)
+glmasterdata	GL Master data (CSV/XLSX)
+historicaldata	Historical invoice data (CSV)
+consumedhistoricaldata	Archived historical data
+7.6 Azure AI Search Index Setup
+The index is automatically created by the auto_upload.py module. Ensure your historical CSV has these columns:
+
+Column	Type	Description
+id	string	Unique record identifier
+lineDescription	string	Historical line description
+GLCode	string	GL Code used
+CostCentre	string	Cost Centre used
+GLDescriptions	string	GL Category/Description
+invoiceDate	string	Invoice date (YYYY-MM-DD)
+approverName	string	Approver who coded the invoice
+vendorId	string	Vendor identifier
+10. File Structure Reference
+nonpollm2_parallel/
+├── function_app.py                    # Main Azure Function entry point
+├── parallel_call.py                   # Parallel processing for LLM Stage 1
+├── parallel_call2.py                  # Parallel processing for LLM Stage 2
+├── gl_cc_logic.py                     # GL/CC prediction with confidence scores
+├── unique_gl_Cat_add.py               # Fetch unique GL categories from AI Search
+├── recent_gl_categories.py            # GL Master data management
+├── GLCat_to_LineDesc.py               # Historical matching and decision logic
+├── auto_upload.py                     # ETL pipeline for historical data
+├── requirements.txt                   # Python dependencies
+├── host.json                          # Azure Functions host configuration
+├── local.settings.json                # Local environment variables
+│
+├── gl_categories_identification/      # LLM Stage 1: GL Category ID
+│   ├── __init__.py
+│   ├── gl_categories_main.py          # Orchestrator
+│   ├── gl_categories_input_validation.py
+│   ├── gl_categories_process_invoice.py
+│   ├── gl_categories_llm_call.py
+│   └── gl_categories_output_validation.py
+│
+└── line_description_matching/         # LLM Stage 2: Line Matching
+    ├── __init__.py
+    ├── line_desc_match_main.py        # Orchestrator
+    ├── line_desc_match_input_validation.py
+    ├── line_desc_match_process_invoice.py
+    ├── line_desc_match_llm_call.py
+    └── line_desc_match_output_validation.py
