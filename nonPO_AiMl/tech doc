@@ -1,0 +1,527 @@
+GL Code & Cost Code Prediction - Technical Documentation
+Use Case: Machine Learning-Based GL Code and Cost Code Prediction for Non-PO Invoice Lines
+
+1. Executive Summary
+1.1 Business Problem
+In accounts payable operations, invoices without Purchase Orders (Non-PO invoices) require manual assignment of General Ledger (GL) Codes and Cost Codes before approval. This manual process is:
+
+Time-consuming: Approvers must research historical patterns to determine correct codes
+Error-prone: Manual entry leads to inconsistent coding across similar invoices
+Bottleneck-creating: Delays in code assignment slow down the approval workflow
+Knowledge-dependent: Relies heavily on experienced approvers who understand vendor-code relationships
+1.2 Solution Overview
+The GL/CC Prediction System is an ML-powered Azure Function that automatically predicts GL Codes and Cost Codes for invoice line items using historical invoice data and ensemble machine learning techniques.
+
+Technique	Purpose
+Historical Pattern Learning	Trains on past invoice-to-code mappings
+Two-Scope Architecture	Scope1 for exact matches, Scope2 for ML prediction
+AdaBoost Classifier	Ensemble learning for high-accuracy predictions
+Confidence Scoring	Provides prediction confidence for approver review
+1.3 Key Capabilities
+Automatic Training: Triggered when new training data is uploaded to blob storage
+Two-Tier Prediction: Exact match lookup (Scope1) with ML fallback (Scope2)
+Confidence Scores: Each prediction includes a confidence percentage
+Dynamic Configuration: All field mappings and parameters are configurable via Azure Blob Storage
+Multi-Format Support: Accepts CSV training file
+Label Encoding: Automatic handling of categorical variables
+Correlation Filtering: Removes highly correlated features to improve model quality
+2. System Architecture
+2.1 High-Level Architecture
+ML Components
+
+Processing Pipeline
+
+Azure Blob Storage
+
+Azure Functions Layer
+
+Client Layer
+
+POST /funcCodingPrediction
+
+Predictions
+
+JSON Response
+
+Client Application / ERP System
+
+Azure Function App
+(HTTP Trigger: /funcCodingPrediction)
+
+Config Container
+(configurable.json)
+
+Training Data Container
+(CSV/Excel Files)
+
+Model Storage Container
+(model1.pkl, scope1.csv, scope2.csv)
+
+Main Orchestrator
+(main.py)
+
+Training Pipeline
+(training.py)
+
+Inference Pipeline
+(inference.py)
+
+Data Cleaning
+(Correlation, Encoding)
+
+Best Combination Finder
+(Non-numeric Fields)
+
+AdaBoost Classifier
+(DecisionTree Base)
+
+2.2 Data Flow Diagram
+Output
+
+Inference Pipeline
+
+Training Pipeline
+
+Training Check
+
+Input
+
+Yes
+
+No
+
+Yes
+
+No
+
+Invoice Data Request
+
+Field Mapping Transform
+
+New Training
+Data Available?
+
+Load & Clean Data
+
+Load Existing Model
+
+Find Best Column Combinations
+
+Create Scope1 & Scope2 Data
+
+Train AdaBoost Model
+
+Scope1: Exact Match Lookup
+
+Match Found?
+
+Return with 100% Confidence
+
+Scope2: ML Prediction
+
+Return with Confidence Score
+
+Merge Results
+
+Final JSON Response
+
+2.3 Two-Scope Prediction Architecture
+Scope 2 - ML Prediction (Variable Confidence)
+
+Scope 1 - Exact Match (100% Confidence)
+
+Input Data
+
+Yes
+
+No
+
+Yes
+
+No
+
+Invoice Line Item
+
+Match against Scope1.csv
+
+Unique GL/CC
+for field combination?
+
+Return Prediction
+Confidence: 100%
+
+Match against Scope2.csv
+
+In Training
+Distribution?
+
+Apply AdaBoost Model
+
+Return Prediction
+with Probability Score
+
+Return No Prediction
+Confidence: 0%
+With 'code not predicted'
+
+2.4 Technology Stack
+Layer	Technology	Purpose
+Runtime	Azure Functions (Python 3.11)	Serverless HTTP endpoint
+ML Framework	scikit-learn 1.5.1	Model training and inference
+Classifier	AdaBoostClassifier	Ensemble learning with DecisionTree base
+Data Processing	Pandas 2.2.2, NumPy 2.0.2	Data manipulation and preprocessing
+Storage	Azure Blob Storage	Configuration, training data, and models
+Serialization	Pickle	Model and encoder persistence
+File Support	pyxlsb 1.0.10	Excel binary format support
+3. Component Deep Dive
+3.1 Function App Entry Point
+File: function_app.py
+
+The main HTTP trigger that receives invoice data and returns GL/CC predictions.
+
+FunctionApp
+
++funcCodingPrediction(req: HttpRequest) : HttpResponse
+
++final_transform(data, mapping) : list
+
++replace_na(obj) : object
+
+Key Responsibilities:
+
+Accept HTTP POST requests with invoice data
+Transform response data using field mapping
+Handle pd.NA values for JSON serialization
+Return structured JSON responses with predictions
+3.2 Main Orchestrator Module
+File: main.py
+
+Central orchestrator that manages both training and inference workflows.
+
+Key Functions:
+
+Function	Purpose
+main()	Entry point - loads config, decides train or infer
+check_train_or_test()	Checks for new training data, triggers training if found
+transform_data()	Applies field mapping to input data
+clean_numeric_columns()	Validates and cleans numeric fields
+check_column_dtype()	Validates data types match configuration
+3.3 Training Pipeline Module
+File: training.py
+
+Handles the complete ML model training workflow.
+
+Key Functions:
+
+Function	Purpose
+training()	Main entry point for training pipeline
+load_and_clean_data()	Cleans data, creates label encoders, removes correlated columns
+find_best_column_combinations()	Finds optimal non-numeric field combinations for Scope1
+prepare_scope2_data()	Separates data into Scope1 (exact match) and Scope2 (ML)
+get_glcc_upto_threshold()	Filters low-frequency GL/CC codes for better model accuracy
+train_model()	Trains AdaBoost classifier and saves to blob storage
+Training Pipeline:
+
+Azure Blob Storage
+training.py
+main.py
+Azure Blob Storage
+training.py
+main.py
+Drop nulls, encode categoricals,
+remove correlated columns (>0.85)
+Find non-numeric field combo
+with max unique GL/CC coverage
+Scope1: combinations with 1 GL/CC
+Scope2: combinations with 2+ GL/CC
+Filter low-frequency codes,
+Train AdaBoost (depth=12, n=50)
+training(data, config)
+load_and_clean_data()
+find_best_column_combinations()
+prepare_scope2_data()
+Upload scope1.csv
+train_model()
+Upload scope2.csv
+Upload model1.pkl
+Upload label_encoder.pkl
+Upload training_config.json
+Return model, config
+GL/CC Code Merging: The system combines multiple target columns (GL Code, Cost Code) into a single target:
+
+gl__cc = "GL_Code_Value__Cost_Code_Value"
+Example: "6015120__102210014"
+3.4 Inference Pipeline Module
+File: inference.py
+
+Handles prediction logic with the two-scope architecture.
+
+Key Functions:
+
+Function	Purpose
+process_inference()	Main inference pipeline
+validate_and_prepare_dataframe()	Validates input data structure
+safe_split()	Splits merged gl__cc back to individual codes
+Inference Logic:
+
+Yes
+
+No
+
+Yes
+
+No
+
+Input DataFrame
+
+Validate Required Columns
+
+Load Scope1.csv
+
+Match input against Scope1
+
+Exact Match?
+
+Assign GL/CC
+Confidence: 100%
+
+Load Scope2.csv
+
+In Scope2
+Distribution?
+
+Load Model
+
+Apply Label Encoders
+
+Predict with AdaBoost
+
+Get Probability Score
+
+Assign GL/CC
+with Confidence
+
+No Prediction
+Confidence: 0%
+
+Merge All Results
+
+Return Final DataFrame
+
+4. API Reference
+4.2 Request Schema
+The request body is a JSON object where each key is a unique invoice line identifier, and the value contains the invoice fields.
+
+{
+    "invl0": {
+        "Invoice: Document Type": "PO Invoice",
+        "Invoice Type": "Ariba",
+        "Invoice: Country": "Sweden",
+        "Invoice: Company VAT Reg No": "SE 556898003001",
+        "Invoice: Currency": "SEK",
+        "Invoice: VAT Amount": 2797.65,
+        "Invoice: Gross Amount": 13988.25,
+        "Invoice: Vendor Number": 20035658.0,
+        "Invoice: Vendor": "Randstad AB",
+        "Invoice: Company Name": "Carlsberg Supply Company Sverige AB",
+        "Invoice: Legal Entity": "D002"
+    },
+    "invl1": {
+        "Invoice: Document Type": "Non PO Invoice",
+        "Invoice Type": "Normal",
+        "Invoice: Country": "Finland",
+        "Invoice: Company VAT Reg No": "FI01139514",
+        "Invoice: Currency": "EUR",
+        "Invoice: VAT Amount": 18000.0,
+        "Invoice: Gross Amount": 93000.0,
+        "Invoice: Vendor Number": 20038550.0,
+        "Invoice: Vendor": "HIFK-Hockey Oy Ab",
+        "Invoice: Company Name": "Oy Sinebrychoff AB",
+        "Invoice: Legal Entity": "E001"
+    }
+}
+4.3 Response Schema
+Success Response (200 OK):
+
+[
+    {
+        "Success": "True",
+        "ID": "invl0",
+        "GL Code": {
+            "field_value": 6015120,
+            "confidence_score": 98.45
+        },
+        "Cost Code": {
+            "field_value": 102210014,
+            "confidence_score": 98.45
+        }
+    },
+    {
+        "Success": "True",
+        "ID": "invl1",
+        "GL Code": {
+            "field_value": 6230130,
+            "confidence_score": 100.0
+        },
+        "Cost Code": {
+            "field_value": 115600620,
+            "confidence_score": 100.0
+        }
+    }
+]
+Partial Failure Response:
+
+[
+    {
+        "Success": "False",
+        "ID": "invl2",
+        "error": "Missing required columns",
+        "missing_fields": ["Invoice: Vendor", "Invoice: Currency"]
+    },
+    {
+        "Success": "False",
+        "ID": "invl3",
+        "error": "Code not predicted"
+    }
+]
+Error Response (400/500):
+
+{
+    "error": "Fields missing in the dataset: Invoice: Document Type, Invoice: Vendor",
+    "status_code": 400
+}
+5. Configuration Guide
+5.1 Configuration File (configurable.json)
+The configuration is stored in Azure Blob Storage in the config container. A sample is attached below:
+
+{
+    "train_blob": "train-data",
+    "replace_train_blob": "processed-train-data",
+    "training_file_storage": "model-storage",
+    "non_empty_value_percent": 90,
+    "percent_to_train": 90,
+    "coverage_percent": 50,
+    "x_field_input": "Invoice: Document Type, Invoice Type, Invoice: Country, Invoice: Company VAT Reg No, Invoice: Currency, Invoice: VAT Amount, Invoice: Gross Amount, Invoice: Vendor Number, Invoice: Vendor, Invoice: Company Name, Invoice: Legal Entity",
+    "y_field_input": "GL Code, Cost Code",
+    "numeric_in_x_field": "Invoice: VAT Amount, Invoice: Gross Amount, Invoice: Vendor Number",
+    "numeric_in_y_field": "GL Code, Cost Code",
+    "mapping": {
+        "docType": "Invoice: Document Type",
+        "invType": "Invoice Type",
+        "country": "Invoice: Country",
+        "vatRegNo": "Invoice: Company VAT Reg No",
+        "currency": "Invoice: Currency",
+        "vatAmount": "Invoice: VAT Amount",
+        "grossAmount": "Invoice: Gross Amount",
+        "vendorNo": "Invoice: Vendor Number",
+        "vendorName": "Invoice: Vendor",
+        "companyName": "Invoice: Company Name",
+        "legalEntity": "Invoice: Legal Entity"
+    }
+}
+5.2 Parameter Reference
+Storage Parameters
+Parameter	Type	Description
+train_blob	string	Container for uploading new training files
+replace_train_blob	string	Container where processed training files are moved
+training_file_storage	string	Container for storing model artifacts
+Training Parameters
+Parameter	Type	Default	Description
+percent_to_train	int	90	Percentage of most frequent GL/CC codes to include in training (filters rare codes)
+coverage_percent	int	50	Percentage of remaining data to include in Scope2 training
+non_empty_value_percent	int	90	Minimum percentage of non-null values required (fails if more than 10% nulls)
+Field Configuration Parameters
+Parameter	Type	Description
+x_field_input	string	Comma-separated list of input feature column names
+y_field_input	string	Comma-separated list of target column names
+numeric_in_x_field	string	Comma-separated list of numeric input fields
+numeric_in_y_field	string	Comma-separated list of numeric target fields
+mapping	object	Maps external field names to internal field names
+5.3 Generated Training Configuration (training_config.json)
+After training, a configuration file is generated with these parameters:
+
+{
+    "x_field": ["Invoice: Document Type", "Invoice Type", "..."],
+    "y_field": ["GL Code", "Cost Code"],
+    "column dtype": {
+        "Invoice: Document Type": "string",
+        "Invoice: VAT Amount": "Float64",
+        "GL Code": "Int64",
+        "..."
+    },
+    "to_drop": ["Invoice: Country"],
+    "obj_field": ["Invoice: Document Type", "Invoice Type", "..."],
+    "best_combo": ["Invoice: Document Type", "Invoice Type", "..."]
+}
+Parameter	Description
+column dtype	Original data types for response casting
+to_drop	Columns removed due to high correlation or single value
+obj_field	Non-numeric (object/string) columns used for encoding
+best_combo	Best combination of columns for Scope1 matching
+6. Model Training Details
+6.1 Data Preprocessing
+Null Handling: Rows with any null values are dropped. Process fails if more than (100 - non_empty_value_percent)% data is dropped.
+
+Numeric Cleaning: Numeric columns are cleaned for:
+
+Comma separators (e.g., "1,234.56" → "1234.56")
+Multiple decimal points (keeps last)
+Type validation
+Correlation Filtering: Columns with correlation > 0.85 are removed (keeps column with more unique values).
+
+Single-Value Removal: Columns with only one unique value are dropped.
+
+Label Encoding: All non-numeric columns are encoded using sklearn.LabelEncoder.
+
+6.2 Scope1 vs Scope2 Split
+Yes
+
+No
+
+Yes
+
+No
+
+Total Training Data
+
+Group by
+Non-Numeric Fields
+
+Count Unique GL/CC
+per Group
+
+Unique Count = 1?
+
+Scope1 Data
+Exact Match Lookup
+
+Unique Count
+within Range?
+
+Scope2 Data
+ML Training
+
+Excluded
+Too Many Variations
+
+Scope1: Groups of non-numeric field combinations that always result in the same GL/CC code. These are used for exact match lookup with 100% confidence.
+
+Scope2: Groups with 2 or more (but limited) GL/CC possibilities. These are used for ML model training.
+
+6.3 Model Architecture
+Parameter	Value
+Algorithm	AdaBoostClassifier
+Base Estimator	DecisionTreeClassifier
+Tree Max Depth	12
+Number of Estimators	50
+Learning Rate	0.05
+Test Split	20%
+Random State	42
+8. Artifacts Generated
+8.1 Model Artifacts
+File	Location	Description
+model1.pkl	training_file_storage container	Trained AdaBoost model
+label_encoder.pkl	training_file_storage container	Label encoders for all categorical columns
+scope1.csv	training_file_storage container	Exact match lookup data
+scope2.csv	training_file_storage container	ML training data subset
+training_config.json	training_file_storage container	Training configuration and metadata
