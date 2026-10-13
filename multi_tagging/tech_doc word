@@ -1,0 +1,665 @@
+Multi-Agent System - Technical Documentation
+Use Case: Invoice Line to PO Line Tagging
+Last Updated: January 2026
+
+Table of Contents
+Executive Summary
+System Architecture
+Component Deep Dive
+Process Flow & Sequence Diagrams
+API Reference
+Configuration Guide
+Installation & Setup
+Glossary of Terms
+Troubleshooting
+1. Executive Summary
+1.1 Business Problem
+In enterprise Accounts Payable (AP) automation, organizations receive invoices from vendors that must be matched to corresponding Purchase Order (PO) lines before payment can be processed. This matching is traditionally done manually.
+
+1.2 Solution Overview
+The Multi-Agent System is an intelligent, AI-powered solution that automatically performs strict 1:1 matching between Invoice Lines and PO Lines. It employs a Hybrid Multi-Agent Architecture combining:
+
+Technique	Purpose
+Rule-Based Matching	Exact matches on product codes
+RAG (Retrieval-Augmented Generation)	Semantic similarity matching
+LLM Reasoning	Final decision with context
+1.3 Key Capabilities
+✅ Hybrid Matching: Combines rules + AI for best results
+✅ 1:1 Enforcement: Guarantees no duplicate PO assignments
+✅ Configurable: All thresholds and weights are tunable
+✅ Retry Logic: Automatically retries unmatched items
+✅ External Validation: Integrates with Salesforce for ERP validation
+✅ Parallel Processing: Uses ThreadPoolExecutor for speed
+2. System Architecture
+2.1 High-Level Architecture
+Cognitive Services
+
+Execution Layer
+
+Orchestration Layer
+
+Azure Functions Layer
+
+Client Layer
+
+POST /multiagent_tagging
+
+Workflow Decision
+
+Client Application
+
+Azure Function App
+HTTP Trigger
+
+Supervisor Agent
+Lifecycle Manager
+
+Orchestrator Agent
+LLM Workflow Planner
+
+Input Data Handler
+Validation & Cleaning
+
+Rule-Based Plugin
+Exact Matching
+
+RAG Agent
+Semantic Matching
+
+Salesforce Plugin
+External Validation
+
+Azure OpenAI
+GPT-4o
+
+Azure OpenAI
+Embeddings
+
+In-Memory
+Vector Store
+
+2.2 Component Interaction Diagram
+Agents
+
+Semantic Kernel
+
+owns
+
+creates
+
+creates
+
+uses
+
+uses
+
+uses
+
+Kernel Instance
+
+InputDataHandlerPlugin
+
+EmbeddingPlugin
+
+RetrievalPlugin
+
+RuleBasedPlugin
+
+LLMReasoningAgent
+
+SalesforceStatusPlugin
+
+SupervisorAgent
+
+OrchestratorAgent
+
+RAGAgent
+
+2.3 Technology Stack
+Layer	Technology	Purpose
+Runtime	Azure Functions (Python 3.11)	Serverless execution
+AI Framework	Semantic Kernel 1.37.0	Agent orchestration
+LLM	Azure OpenAI GPT-5-mini	Reasoning & decisions
+Embeddings	Azure OpenAI text-embedding-3-small	Vector generation
+Vector Store	LangChain InMemoryVectorStore	Similarity search
+Data Processing	Pandas	Dataframe operations
+Similarity	scikit-learn	Cosine similarity
+3. Component Deep Dive
+3.1 Supervisor Agent
+File: agents/supervisor_agent.py
+
+The Supervisor Agent is the "Head" of the system. It:
+
+Initializes the Semantic Kernel with Azure OpenAI
+Loads all plugins into the kernel
+Creates the Orchestrator and RAG agents
+Manages the complete request lifecycle
+SupervisorAgent
+
+-config: dict
+
+-kernel: Kernel
+
+-prompts: dict
+
+-orchestrator: OrchestratorAgent
+
+-rag_agent: RAGAgent
+
++init(config, prompts)
+
++_initialize_kernel()
+
++_load_plugins()
+
++orchestrate_matching(invoice_lines, po_lines)
+
+OrchestratorAgent
+
+RAGAgent
+
+Kernel
+
+Key Responsibilities:
+
+Initialize Azure OpenAI connection
+Register all plugins with the kernel
+Coordinate workflow execution based on orchestrator decisions
+Handle retry logic for unmatched items
+3.2 Orchestrator Agent
+File: agents/orchestrator_agent.py
+
+The Orchestrator Agent is an LLM-powered "Brain" that decides which plugins to execute and in what order.
+
+Decision Logic:
+
+If RULES == "yes":
+    Execute: [InputDataHandler → RuleBasedPlugin → RAGAgent]
+    
+If RULES == "no":
+    Execute: [InputDataHandler → RAGAgent]
+Key Features:
+
+Uses Pydantic for response validation
+Multiple parsing strategies for LLM output
+Fallback to known plugin extraction
+3.3 RAG Agent
+File: agents/RAG_Agent.py
+
+The RAG (Retrieval-Augmented Generation) Agent is the core matching engine. It combines:
+
+Vector Similarity: Finds semantically similar PO lines
+Keyword Overlap: Boosts exact token matches
+LLM Reasoning: Makes final match decisions
+Yes
+
+No
+
+Yes
+
+No
+
+Invoice Lines
+
+Generate Embeddings
+
+PO Lines
+
+Generate Embeddings
+
+Store in Vector DB
+
+For Each Invoice
+
+Hybrid Search
+
+Top-K Candidates
+
+Batch for LLM
+
+LLM Reasoning
+
+Match Found?
+
+Add to Results
+
+Add to Retry Queue
+
+Duplicate PO?
+
+Keep Highest Score
+
+Detag Loser
+
+Final Match
+
+Confidence Score Formula:
+
+Score = (Semantic × 0.7) + (LLM × 0.2) + (Parameter × 0.1)
+
+Where:
+- Semantic = Hybrid search score (0-1)
+- LLM = Match percentage from LLM (0-1)
+- Parameter = 1 if cross-check field matches, else 0
+3.4 Rule-Based Plugin
+File: agents/plugins/rule_based_plugin.py
+
+The "Fast Path" that handles exact matches before expensive AI processing.
+
+Matching Rules:
+
+Rule	Description	Example
+Exact Field Match	Invoice field exactly equals PO field	INV.PartNo == PO.PartNo
+Description Substring	Invoice value found in PO description	"ABC123" in PO.Description
+Algorithm Flow:
+
+Clean all text (remove special chars, lowercase)
+Find unique values in each field
+Attempt 1:1 matching on unique values only
+Return matched pairs and remaining unmatched items
+3.5 Retrieval Plugin
+File: agents/plugins/retrieval_plugin.py
+
+Handles vector storage and hybrid retrieval.
+
+Hybrid Search Formula:
+
+hybrid_score = (weight_embedding × cosine_similarity) + (weight_keyword × keyword_overlap)
+
+Default weights:
+- weight_embedding = 0.8
+- weight_keyword = 0.01
+Key Functions:
+
+initialize_vector_store(): Creates in-memory vector store
+store_documents(): Adds PO embeddings to store
+retrieve_documents(): Performs MMR + hybrid search
+delete_documents(): Removes matched PO lines
+3.6 Salesforce Plugin
+File: agents/plugins/salesforce_plugin.py
+
+External validation against the ERP system.
+
+Authentication Flow:
+
+Check for cached access token
+If not present, authenticate using OAuth password grant
+Cache token for subsequent calls
+Handle 401 (token expired) gracefully
+4. Process Flow & Sequence Diagrams
+4.1 Complete Request Lifecycle
+Salesforce
+Azure OpenAI
+VectorDB
+RAGAgent
+RulePlugin
+InputPlugin
+Orchestrator
+Supervisor
+Function App
+Client
+Salesforce
+Azure OpenAI
+VectorDB
+RAGAgent
+RulePlugin
+InputPlugin
+Orchestrator
+Supervisor
+Function App
+Client
+Initialize Kernel & Plugins
+opt
+[Rules Enabled]
+Embedding Generation
+loop
+[For each batch]
+Handle duplicates, Enforce 1:1
+opt
+[Salesforce Validation]
+POST /multiagent_tagging
+Create & Initialize
+get_workflow(context)
+Decide plugin sequence
+["InputDataHandler", "RuleBasedPlugin", "RAGAgent"]
+Workflow array
+validate_input_data()
+Cleaned data
+match_invoices_to_pos()
+Exact matches + Remaining
+run_rag()
+embed_documents(PO lines)
+PO embeddings
+store_documents()
+embed_documents(Invoice lines)
+Invoice embeddings
+hybrid_search()
+Top-K candidates
+Matching prompt
+Match decisions
+Validate matches
+True/False per match
+Final matches
+JSON response
+HTTP 200 + Results
+4.2 Retry & Detagging Flow
+Yes
+
+No
+
+No
+
+Yes
+
+No
+
+Yes
+
+Initial RAG Run
+
+All Matched?
+
+Return Results
+
+Retry Enabled?
+
+Collect Unmatched
+
+Unmatched < 90%?
+
+Stop - Too Many Failures
+
+Filter Available POs
+
+Remove Already Tagged POs
+
+Re-run RAG on Remaining
+
+Merge Results
+
+5. API Reference
+5.1 HTTP Endpoint
+POST /api/multiagent_tagging
+
+Headers:
+
+Content-Type: application/json
+x-functions-key: <your-function-key>
+5.2 Request Schema
+{
+  "Invoice_Line_Item__c": [
+    {
+      "Invoice Line Item Name": "INVL-001",
+      "Product/Service Desc": "Steel Pipe 2 inch",
+      "Product/Service No.": "SP-2IN-001"
+    },
+    {
+      "Invoice Line Item Name": "INVL-002",
+      "Product/Service Desc": "Copper Wire 14 AWG",
+      "Product/Service No.": "CW-14AWG"
+    }
+  ],
+  "PO_Line_Item__c": [
+    {
+      "AP Ref No": "POL-001",
+      "Product/Service Desc": "2 inch Steel Pipe",
+      "Product/Service No.": "SP-2IN-001",
+      "Vendor Part Number": "VP-123"
+    },
+    {
+      "AP Ref No": "POL-002",
+      "Product/Service Desc": "14 AWG Copper Wire",
+      "Product/Service No.": "CW-14AWG",
+      "Vendor Part Number": "VP-456"
+    }
+  ]
+}
+5.3 Response Schema (Exact Format)
+Success (200 OK):
+
+[
+  {
+    "InvoiceLineItemNumber": "INVL-001",
+    "PurchaseOrderNumber": "POL-001",
+    "MatchPercentage": 95,
+    "MatchingReason": "Invoice Product/Service No. matches with PO Product/Service No."
+  },
+  {
+    "InvoiceLineItemNumber": "INVL-002",
+    "PurchaseOrderNumber": "POL-002",
+    "MatchPercentage": 88,
+    "MatchingReason": {
+      "rule_applied": "SEMANTIC_MATCH",
+      "semantic_strength": "strong",
+      "reasoning_summary": "High semantic similarity in product descriptions"
+    }
+  }
+]
+Error Response (400/500):
+
+{
+  "error": "Missing invoice_lines or po_lines",
+  "status_code": 400
+}
+5.4 Field Mapping
+Input Field (Invoice)	Output Field
+Invoice Line Item Name	InvoiceLineItemNumber
+Input Field (PO)	Output Field
+AP Ref No	PurchaseOrderNumber
+6. Configuration Guide
+6.1 Configuration File (config.json)
+{
+  "BATCH_SIZE": 5,
+  "PARALLEL_BATCH_COUNT": 3,
+  "TOP_K_TO_KEEP": 3,
+  "WEIGHT_TO_EMBEDDING": 0.8,
+  "WEIGHT_TO_KEYWORD": 0.01,
+  "THRESHOLD_SCORE_FOR_SIMILARITY": 0.5,
+  "LAMBDA_MULT": 0.5,
+  "DELETE": "yes",
+  "TEMPERATURE": 0.2,
+  "REASONING_EFFORT": "minimal",
+  "RULES": "yes",
+  "retry": "no",
+  "if_retry_is_yes_then_detag_threshold_percent": 90,
+  "DROP_DUPLICATE": "yes",
+  
+  "INV_DESC_FIELD": ["Product/Service Desc"],
+  "INV_NON_DESC_FIELDS": ["Product/Service No."],
+  "INV_LINE_ID_FIELD": "Invoice Line Item Name",
+  
+  "PO_DESC_FIELD": ["Product/Service Desc"],
+  "PO_NON_DESC_FIELDS": ["Product/Service No."],
+  "PO_LINE_ID_FIELD": "AP Ref No",
+  
+  "INVOICE_LINE_CROSSCHECK": ["Product/Service No."],
+  
+  "SALESFORCE_VALIDATION_ENABLED": {
+    "After_each_batch": "no",
+    "Once_at_the_end": "no"
+  },
+  
+  "Weightage_for_confidence_score": {
+    "Semantic": 0.7,
+    "LLM": 0.2,
+    "Parameter_match": 0.1
+  },
+  
+  "map_for_final_output": {
+    "Invoice Line Item Name": "InvoiceLineItemNumber",
+    "AP Ref No": "PurchaseOrderNumber"
+  }
+}
+6.2 Parameter Reference
+Processing Parameters
+Parameter	Type	Default	Description
+BATCH_SIZE	int	5	Number of invoices per LLM call
+PARALLEL_BATCH_COUNT	int	3	Number of concurrent batch executions
+TOP_K_TO_KEEP	int	3	PO candidates to retrieve per invoice
+TEMPERATURE	float	0.2	LLM creativity (lower = more deterministic)
+REASONING_EFFORT	string	"minimal"	OpenAI reasoning level
+Scoring Parameters
+Parameter	Type	Default	Description
+WEIGHT_TO_EMBEDDING	float	0.8	Weight for semantic similarity
+WEIGHT_TO_KEYWORD	float	0.01	Weight for keyword overlap
+THRESHOLD_SCORE_FOR_SIMILARITY	float	0.5	Minimum score to consider match
+Workflow Parameters
+Parameter	Type	Default	Description
+RULES	string	"yes"	Enable rule-based matching first
+retry	string	"no"	Enable retry for unmatched items
+if_retry_is_yes_then_detag_threshold_percent	int	90	Stop retry if unmatched > X%
+DELETE	string	"yes"	Remove matched POs from vector store
+DROP_DUPLICATE	string	"yes"	Remove duplicate PO lines
+Validation Parameters
+Parameter	Type	Description
+SALESFORCE_VALIDATION_ENABLED.After_each_batch	string	Validate after every batch
+SALESFORCE_VALIDATION_ENABLED.Once_at_the_end	string	Validate only at the end
+7. Installation & Setup
+7.1 Prerequisites
+Python 3.12
+Azure Subscription with:
+Azure Functions resource
+Azure OpenAI resource with GPT-4o deployment
+Azure OpenAI resource with embedding model deployment
+Visual Studio Code with Azure Functions extension (recommended)
+7.2 Local Development Setup
+# 1. Clone repository
+git clone <repo-url>
+cd multiagent_ami
+
+# 2. Create virtual environment
+python -m venv venv
+
+# 3. Activate virtual environment
+# Windows:
+venv\Scripts\activate
+# Linux/Mac:
+source venv/bin/activate
+
+# 4. Install dependencies
+pip install -r requirements.txt
+
+# 5. Create .env file (see section 7.3)
+
+# 6. Run locally
+func host start
+7.3 Environment Variables
+Create a .env file in the multiagent_ami directory:
+
+# ============================================
+# AZURE FUNCTIONS
+# ============================================
+AzureWebJobsStorage="UseDevelopmentStorage=true"
+
+# ============================================
+# AZURE OPENAI - REASONING (GPT-4o)
+# ============================================
+SK_SERVICE_ID="azure_openai_chat"
+AZURE_DEPLOYMENT_NAME="gpt-5-mini"
+AZURE_OPENAI_ENDPOINT="https://<your-resource>.openai.azure.com/"
+AZURE_OPENAI_API_KEY="<your-api-key>"
+AZURE_OPENAI_API_VERSION="2024-02-15-preview"
+AZURE_OPENAI_MODEL="gpt-5-mini"
+
+# ============================================
+# AZURE OPENAI - EMBEDDINGS
+# ============================================
+AZURE_OPENAI_API_KEY_embed="<your-api-key>"
+AZURE_OPENAI_ENDPOINT_embed="https://<your-resource>.openai.azure.com/"
+AZURE_EMBEDDING_DEPLOYMENT_NAME="text-embedding-3-large"
+AZURE_OPENAI_API_VERSION_embed="2023-05-15"
+
+# ============================================
+# SALESFORCE (Optional)
+# ============================================
+SF_GRANT_TYPE="password"
+SF_CLIENT_ID="<client-id>"
+SF_CLIENT_SECRET="<client-secret>"
+SF_USERNAME="<username>"
+SF_PASSWORD="<password>"
+SF_LOGIN_URL="https://login.salesforce.com"
+SF_ENDPOINT_URL="https://<instance>.salesforce.com/services/apexrest/..."
+7.4 Project Structure
+multiagent_ami/
+├── .env                          # Environment variables (create this)
+├── .funcignore                   # Azure Functions ignore file
+├── .gitignore                    # Git ignore file
+├── config.json                   # Runtime configuration
+├── function_app.py               # HTTP trigger entry point
+├── host.json                     # Azure Functions host config
+├── local.settings.json           # Local development settings
+├── requirements.txt              # Python dependencies
+│
+└── agents/
+    ├── __init__.py
+    ├── supervisor_agent.py       # Main orchestrator
+    ├── orchestrator_agent.py     # LLM workflow planner
+    ├── RAG_Agent.py              # Core semantic matching
+    ├── llm_reasoning_agent.py    # Direct LLM calls
+    ├── final_output_processor.py # Output formatting
+    │
+    └── plugins/
+        ├── __init__.py
+        ├── io_handler_plugin.py      # Input validation
+        ├── embedding_plugin.py       # Vector generation
+        ├── retrieval_plugin.py       # Hybrid search
+        ├── rule_based_plugin.py      # Exact matching
+        └── salesforce_plugin.py      # ERP validation
+8. Glossary of Terms
+Term	Definition
+1:1 Matching	Each invoice line can match to exactly one PO line, and vice versa
+Cosine Similarity	Mathematical measure of similarity between two vectors (0 = different, 1 = identical)
+Detagging	Process of removing a previously assigned PO match when a better match is found
+Embedding	Dense vector representation of text for semantic comparison
+Hybrid Search	Combination of vector similarity and keyword matching
+LLM	Large Language Model (e.g., GPT-4o) used for reasoning
+MMR	Maximal Marginal Relevance - balances relevance with diversity in search results
+Orchestrator	Component that decides which plugins to run and in what order
+Plugin	Modular component registered with Semantic Kernel for specific tasks
+RAG	Retrieval-Augmented Generation - combining search with LLM reasoning
+Retry	Re-processing of unmatched items with updated context
+Semantic Kernel	Microsoft's SDK for AI orchestration and plugin management
+Supervisor	Main coordinator that manages the lifecycle of a request
+Threshold	Minimum score required to consider a match valid
+Vector Store	Database optimized for storing and searching vector embeddings
+Appendix A: System Prompts
+Orchestrator System Prompt
+You are an orchestrator agent that determines the plugin execution workflow 
+for invoice-to-PO line matching.
+
+## Available Plugins
+- InputDataHandlerPlugin: Extracts and processes input data
+- RuleBasedPlugin: Applies deterministic matching rules  
+- RAGAgent: Performs intelligent invoice-to-PO matching using retrieval 
+  and LLM reasoning
+
+## Decision Logic
+You will receive a context with a "Rules" field that is either "yes" or "no".
+
+**If Rules == "yes":**
+Execute rule-based matching first, then RAG for unmatched items.
+Output: ["InputDataHandlerPlugin", "RuleBasedPlugin", "RAGAgent"]
+
+**If Rules == "no":**  
+Skip rule-based matching and go directly to RAG.
+Output: ["InputDataHandlerPlugin", "RAGAgent"]
+Matching System Prompt
+You are a matching expert in an enterprise Accounts Payable automation system. 
+Your task is to perform a strict one-to-one match between invoice lines and 
+purchase order (PO) lines using the rules below.
+
+### Matching Rules (Strict Priority Order)
+
+1. **Exact Match – Product/Service Number**
+   If Product/Service Number exactly matches, assign 100% match.
+
+2. **Semantic Match (Only if Rule 1 fails)**
+   Apply NLP-based semantic similarity:
+   - 90–100% → Strong semantic match
+   - 40-89% → Moderate match  
+   - <40% → Do not match
+
+### Match Selection Logic
+- Match each invoice line to exactly one PO line (1:1 matching)
+- Once matched, a PO line cannot be reused
+- If multiple PO lines qualify, select highest score
