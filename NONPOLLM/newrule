@@ -1,0 +1,124 @@
+1. When Only One GL Category is Returned 
+
+a. Newly Added GL Category (No Historical Data) 
+
+If the GL Category is newly introduced and there is no historical transaction reference: 
+
+The system will use this GL Category as the prediction result. No further LLM callout is required. 
+
+A low confidence score will be assigned, indicating that the prediction should be reviewed manually if needed. 
+
+Base score 
+
+b. Old GL Category (No Historical Data) 
+
+If the GL Category already exists but has no past transaction history, then: 
+
+The system will use this GL Category as the prediction result. No further LLM callout is required. 
+
+A low confidence score will be assigned, indicating that the prediction should be reviewed manually if needed. 
+
+Base score 
+
+c. Old GL Category (Historical Data available) 
+
+If the GL Category already exists but has past transaction history, then: 
+
+The system will directly use the GL Category that has history. 
+
+No further LLM validation is needed. 
+
+0.5*Si(max)+0.2F+0.3R(most recent) 
+
+ 
+
+2. When Multiple GL Categories are Returned 
+
+a. All GL Categories Are Without History 
+
+If none of the returned GL Categories have any past reference: 
+
+The system cannot select a confident match. 
+
+The output is “No GL Code Found.” 
+
+0 
+
+b. Only One GL Category Has Historical Reference, Others are without historical reference  
+
+If multiple GL Categories are returned, but only one of them has past records (and others are old but unused): 
+
+The system will directly use the GL Category that has history. 
+
+No further LLM validation is needed. 
+
+0.5*Si(max)+0.2F+0.3R(most recent) 
+
+ 
+
+c. Only One GL Category Has Historical Reference, Others Are Newly added (No History) 
+
+If one category has history, and one or more others are newly added with no history: 
+
+The system will use this GL Category as the prediction result. No further LLM callout is required. 
+
+The confidence score will be low, since new GL Categories might become valid in future. 
+
+Base score 
+
+d. Some GL Categories Have History, and at Least One New Category Exists (No History) 
+
+If there are multiple categories with mixed history — some historical and some newly added with no reference: 
+
+The system will trigger a second LLM callout. 
+
+The prediction will carry a low confidence score and be flagged for manual review. 
+
+Base score 
+
+e. Some GL Categories Have History, None Are New 
+
+If multiple categories have partial historical data but no new categories are introduced: 
+
+The system will perform a second LLM callout for further validation before deciding. 
+
+If single code in GL/CC Prediction Strategy-> 0.5*Si(LLM given desc)+0.2F+0.3R(most recent) 
+
+ 
+if multiple codes in GL/CC prediction Strategy -> Cs of given category/Sum of all categories 
+
+ 
+
+f. All Categories Are Newly Added (No History) 
+
+If every GL Category is new and has no historical reference: 
+
+The system cannot find any matching GL Code. 
+
+The result is “No GL Code Found.” 
+
+0 
+
+ 
+
+Cost Centre (CC) Code Détermination Logic 
+
+Once the GL Category (and GL Code) is identified, the Cost Centre is determined using the following rules: 
+
+Priority on Historical Match 
+
+First, check historical data for CC code where the selected GL Code was used with the same vendor and requester combination. 
+
+Fallback Check Within Initial LLM Results 
+
+If no CC Code is found in history for the selected vendor/requester, check among other GL Categories returned in the first LLM callout.  
+
+A low confidence score will be assigned 
+
+No Full Dataset Search 
+
+The system does not re-check the entire historical dataset. 
+
+This is to maintain prediction performance and ensure results remain aligned with the context of the current transaction. 
+
+ 
