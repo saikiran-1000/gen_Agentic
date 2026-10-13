@@ -1,0 +1,33 @@
+
+{
+    "key": "INV-2024-001",
+    "Invoice_Date__c": "2024-09-15",
+    "Bill_To_Country__c": "country",
+    "AP_Vendor_Code__c": "V0002",
+    "Invoice_Line_Item__c": [
+        {
+            "ID": "LINE-001",
+            "Product/Service Desc": "Bulk Lentils Dried Bulk",
+            "Product/Service No.": "MAT0011",
+            "Qty": 100.0,
+            "Total Multiple GRN Qty": 100.0,
+            "UOM": "KG"
+        },
+        {
+            "ID": "LINE-002",
+            "Product/Service Desc": "Bulk Carrot Bulk 10kg Bulk",
+            "Product/Service No.": "MAT0007",
+            "Qty": 100.02,
+            "Total Multiple GRN Qty": "75,02",
+            "UOM": "KG"
+        },
+        {
+            "ID": "LINE-003",
+            "Product/Service Desc": "Blk Bns CNND",
+            "Product/Service No.": "MAT0003",
+            "Qty": 100.02,
+            "Total Multiple GRN Qty": "75,02",
+            "UOM": "CTN"
+        }
+    ]
+}
