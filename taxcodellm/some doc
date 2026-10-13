@@ -1,0 +1,467 @@
+Tax Coding Identification  
+
+Interface Control Document (ICD) 
+
+Overview 
+
+This document describes the required sample input and output formats for the Tax Coding use case pipeline. The pipeline automates the decision-making process for identifying tax codes for invoice line items using the information available. This pipeline will work post the rule-based tax coding identification process in AP Advance layer, and the input and output samples gives information of the JSON input format and output format for the LLM layer respectively. The tax codes will be identified based on the filtered tax master data and filtered historical data that will be passed to the LLM layer along with the invoice headers and lines. The filtering of the tax master data and the historical data will be done at the AP Advance layer. 
+
+Input Data Sample 
+
+The pipeline expects the following input JSON structure for an invoice: 
+
+{ 
+
+    "invoiceID": "INV12345", 
+
+    "companyCountry": "US", 
+
+    "companyCode": "G152", 
+
+    "vendorNumber": "945", 
+
+    "vendorCountry": "US", 
+
+    "origin":"Domestic", 
+
+    "countryOfDelivery": "US", 
+
+    "invoiceDate":"24/08/2024", 
+
+    "invoiceLineItems":  [ 
+
+        { 
+
+            "invoiceLineID": "a290tevb278367", 
+
+            "lineItemDescription": "Ripe Apples", 
+
+            "matOrServID": "6863902", 
+
+            "taxPercent": "21", 
+
+            "glCode": "7192391", 
+
+            "taxType": "VAT", 
+
+            "regionOfDelivery": ["NY","DC"], 
+
+            "historicalData": [ 
+
+                { 
+
+      "invoiceLineID": "a29081023", 
+
+                    "lineItemDescription": "Apple 5*20 Kg", 
+
+                    "matOrServID": "563", 
+
+                    "taxPercent": "21", 
+
+                    "glCode": "1821791", 
+
+       "taxCode": "SO1", 
+
+       "invoiceDate": "17/05/2023", 
+
+       "regionOfDelivery": ["NY","DC"], 
+
+                }, 
+
+                { 
+
+      "invoiceLineID": "a29088374", 
+
+                    "lineItemDescription": "Mango 5*20 Kg", 
+
+                    "matOrServID": "563", 
+
+                    "taxPercent": "21", 
+
+                    "glCode": "1821356", 
+
+      "taxCode": "SO1", 
+
+      "invoiceDate": "17/05/2023", 
+
+      "regionOfDelivery": ["NY","DC"], 
+
+                }, 
+
+            ], 
+
+"taxMasterDataLineItems":  [ 
+
+        { 
+
+            "taxPercent": "21", 
+
+            "companyCountry": "US", 
+
+            "taxCode": "SO1", 
+
+            "taxCodeDescription": "Unrecoverable fruit sales", 
+
+        }, 
+
+        { 
+
+            "taxPercent": "21", 
+
+            "companyCountry": "US", 
+
+            "taxCode": "FO1", 
+
+            "taxCodeDescription": "Fruit Sales", 
+
+        }, 
+
+] 
+
+        }, 
+
+        { 
+
+            "invoiceLineID": "a290tevb81293", 
+
+            "lineItemDescription": "Alaska Mango", 
+
+            "matOrServID": "68682190", 
+
+            "taxPercent": "21", 
+
+            "glCode": "71921234", 
+
+            "taxType": "VAT", 
+
+            "regionOfDelivery": ["NY","DC"], 
+
+            "historicalData": [ 
+
+                { 
+
+      "invoiceLineID": "a29081238", 
+
+                    "lineItemDescription": "Mango 100 Oz", 
+
+                    "matOrServID": "570", 
+
+                    "taxPercent": "21", 
+
+                    "glCode": "1821791", 
+
+            	       "taxCode": "FO1", 
+
+       "invoiceDate": "17/05/2023", 
+
+       "regionOfDelivery": ["NY","DC"], 
+
+                } 
+
+            ], 
+
+"taxMasterDataLineItems": [ 
+
+        { 
+
+            "taxPercent": "21", 
+
+            "companyCountry": "NY", 
+
+            "taxCode": "GO1", 
+
+            "taxCodeDescription": "Unrecoverable fruit sales", 
+
+        }, 
+
+] 
+
+        }, 
+
+    ] 
+
+} 
+
+ 
+
+Key Fields: 
+
+invoiceID (Datatype: String): Unique identifier for the invoice. 
+
+companyCountry (Datatype: String): The country code of the company receiving the invoice (e.g., 'US'). 
+
+companyCode (Datatype: String): The code for the company receiving the invoice. 
+
+vendorNumber (Datatype: String): Unique identifier for the vendor. 
+
+vendorCountry (Datatype: String): The country code of the vendor. 
+
+origin: The origin of the transaction (e.g., 'Domestic', 'Import'). 
+
+countryOfDelivery (Datatype: String): The country where the goods or services are delivered. 
+
+additionalDetails (Datatype: Dictionary with String keys and values): An object containing other invoice-level information. 
+
+invoiceLineItems (Datatype: Dictionary): A list of individual line items from the invoice, each with: 
+
+invoiceLineID (Datatype: String): Unique identifier for the invoice line. 
+
+lineItemDescription (Datatype: String): Description of the item on the line. 
+
+matOrServID (Datatype: String): The unique identifier for the material. 
+
+taxPercent (Datatype: String): Tax percentage applied to the line item. 
+
+glCode (Datatype: String): The General Ledger code associated with the line item. 
+
+taxType (Datatype: String): The type of tax applied (e.g., 'VAT'). 
+
+regionOfDelivery (Datatype: List of String): An array of delivery regions or states (e.g., ["NY","DC"]). 
+
+invoiceDate (Datatype: String with date format dd/mm/YYYY): A string representing date of the invoice in dd/mm/YYYY format.  
+
+historicalData (Datatype: Dictionary): A list of past purchase records related to the item, each with: 
+
+invoiceLineID (Datatype: String): Unique identifier from the historical invoice line. 
+
+lineItemDescription (Datatype: String): Description from the historical line. 
+
+matOrServID (Datatype: String): Material or service ID from the historical record. 
+
+taxPercent (Datatype: String): Tax percentage from the historical line. 
+
+glCode (Datatype: String): GL code from the historical line. 
+
+taxCode (Datatype: String): Tax code from the historical line. 
+
+invoiceDate (Datatype: String): Date of the historical invoice. 
+
+regionOfDelivery (Datatype: List of String): An array of delivery regions from the historical line. 
+
+taxMasterDataLineItems (Datatype: Dictionary): A list of master data records used for tax determination, each with: 
+
+taxPercent (Datatype: String): Tax percentage from the master data. 
+
+companyCountry (Datatype: String): An array of applicable delivery regions. 
+
+taxCode (Datatype: String): The specific tax code that applies (e.g., "SO1"). 
+
+taxCodeDescription (Datatype: String): A description of the tax code. 
+
+ 
+
+Important Information: 
+
+The names and number of the key fields may vary (in input) but all relevant field names mapping will be provided in the configuration file. 
+
+The field names may also vary for different clients, here as well the configuration file will be utilized for key field names mapping.  
+
+ 
+
+Sample Output Format 
+
+The pipeline will return its decision and justification for each invoice line item in the following JSON format: 
+
+{ 
+
+"invoiceID": "INV12345", 
+
+  "invoiceLineItemsResults": [ 
+
+    { 
+
+      "invoiceLineID": "a290tevb278367", 
+
+      "taxCodeRecommendation": "SO1", 
+
+      "justification": "<reasons for the tax code recommendations>" 
+
+    }, 
+
+    { 
+
+      "invoiceLineID": "b390xkqw983245", 
+
+      "taxCodeRecommendation": "No recommendation for tax-code", 
+
+      "justification": "<reasons for the tax code recommendations along with shortlisted taxcodes>" 
+
+    } 
+
+  ] 
+
+} 
+
+ 
+
+Fields: 
+
+invoiceID (Datatype: String): The invoice ID. 
+
+invoiceLineItemsResults (Datatype: List of Dictionary): A list containing the result for each invoice line item. 
+
+invoiceLineID (Datatype: String): Unique identifier for the invoice line item. 
+
+taxCodeRecommendation (Datatype: String): The LLM recommended tax code. 
+
+justification (Datatype: String): Explains the recommendation. 
+
+ 
+
+Cases 
+
+The pipeline will return its recommendation and justification for tax code identified for each invoice line item in the following JSON format: 
+
+ 
+
+VAT master data and historical data both do not have any row available. 
+
+This case occurs when there is no relevant information in either the master tax data or the historical invoice data to base a recommendation on. 
+
+Output Example: 
+
+{ 
+
+  "invoiceID": "INV12345", 
+
+  "invoiceLineItemsResults": [ 
+
+    { 
+
+      "invoiceLineID": "l12345", 
+
+      "taxCodeRecommendation": "No recommendation for tax-code", 
+
+      "justification": "Not enough data is available in master and historical data for tax-code recommendation" 
+
+    } 
+
+  ] 
+
+} 
+
+ 
+
+ 
+
+ VAT master data has no row data, but historical data is available. 
+
+In this scenario, the system cannot find a match in the master tax data, but it does find consistent tax code usage for similar line items in past invoices. 
+
+Output Example: 
+
+{ 
+
+  "invoiceID": "INV12345", 
+
+  "invoiceLineItemsResults": [ 
+
+    { 
+
+      "invoiceLineID": "l12345", 
+
+      "taxCodeRecommendation": "XX1", 
+
+      "justification": "Master data is not available for tax-code recommendation but XX1 is the recommendation from historical evidence" 
+
+    } 
+
+  ] 
+
+} 
+
+ 
+
+VAT master data has data available but historical data is not available. 
+
+Here, a recommendation is made based on the rules and information present in the master tax data, as there is no historical data for this specific line item to compare against. 
+
+ 
+
+Output Example: 
+
+{ 
+
+  "invoiceID": "INV12345", 
+
+  "invoiceLineItemsResults": [ 
+
+    { 
+
+      "invoiceLineID": "l12345", 
+
+      "taxCodeRecommendation": "No recommendation for tax-code", 
+
+      "justification": "XX1 is recommended from master data but historical evidence is missing" 
+
+    } 
+
+  ] 
+
+} 
+
+ 
+
+ Both VAT and master data is available and both points to same tax code. 
+
+This is the ideal case where both the master tax data and historical precedents align, providing a high-confidence recommendation for a single tax code. 
+
+Output Example: 
+
+{ 
+
+  "invoiceID": "INV12345", 
+
+  "invoiceLineItemsResults": [ 
+
+    { 
+
+      "invoiceLineID": "l12345", 
+
+      "taxCodeRecommendation": "XX1", 
+
+      "justification": "XX1 is recommended from master data and historical evidence" 
+
+    } 
+
+  ] 
+
+} 
+
+ 
+
+ Both VAT and master data is available, but they are not pointing to the same tax code. 
+
+This case highlights a conflict between the master data and historical data. The system identifies both potential tax codes and presents them for manual review. 
+
+ 
+
+Output Example: 
+
+{ 
+
+  "invoiceID": "INV12345", 
+
+  "invoiceLineItemsResults": [ 
+
+    { 
+
+      "invoiceLineID": "l12345", 
+
+      "taxCodeRecommendation": " No recommendation for tax-code ", 
+
+      "justification": "XX1 is recommended from master data and XX2 is recommended from historical evidence" 
+
+    } 
+
+  ] 
+
+} 
+
+ 
+
+ 
+
+*NOTE: The justification will not be exactly as shown above, it will depend on the natural language generated by the model. 
+
+ 
