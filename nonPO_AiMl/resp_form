@@ -1,0 +1,38 @@
+[
+    {
+        "Success": "True",
+        "ID": "a0d3O000004OfIdQAK",
+        "GL Code": {
+            "field_value": "0042001001",
+            "confidence_score": 100.0
+        },
+        "Cost Code": {
+            "field_value": "0000015733",
+            "confidence_score": 100.0
+        }
+    },
+    {
+        "Success": "True",
+        "ID": "a0d3O00004OfIdQAK",
+        "GL Code": {
+            "field_value": "0042004001",
+            "confidence_score": 100.0
+        },
+        "Cost Code": {
+            "field_value": "0000045046",
+            "confidence_score": 100.0
+        }
+    },
+    {
+        "Success": "True",
+        "ID": "a0d3O000004OfIQAK",
+        "GL Code": {
+            "field_value": "0041318008",
+            "confidence_score": 61.0
+        },
+        "Cost Code": {
+            "field_value": "0003303313",
+            "confidence_score": 61.0
+        }
+    }
+]
