@@ -1,0 +1,70 @@
+{
+    "Invoice Line Item": [
+        {
+            "Tax Code Master": [
+                {
+                    "Description": "Eco-friendly vehicles taxed at reduced GST",
+                    "Tax Code": "AU AP ECO VEHICLE",
+                    "Country Name": "Australia",
+                    "Tax Rate": "5.00"
+                },
+                {
+                    "Description": "Solar panels taxed at reduced GST (historical)",
+                    "Tax Code": "AU AP SOLAR PANEL HIST",
+                    "Country Name": "Australia",
+                    "Tax Rate": "5.00"
+                }
+            ],
+            "Tax Type": "VAT",
+            "Tax Rate(%)": "5.00",
+            "Product/Service Desc": "Eco Sedan/Panel Restoration/Sydney",
+            "Record ID": "a0xIm000000DL6yIAG"
+        },
+        {
+            "Tax Code Master": [
+                {
+                    "Description": "Eco-friendly vehicles taxed at reduced GST",
+                    "Tax Code": "AU AP ECO VEHICLE",
+                    "Country Name": "Australia",
+                    "Tax Rate": "5.00"
+                },
+                {
+                    "Description": "Solar panels taxed at reduced GST (historical)",
+                    "Tax Code": "AU AP SOLAR PANEL HIST",
+                    "Country Name": "Australia",
+                    "Tax Rate": "5.00"
+                }
+            ],
+            "Tax Type": "VAT",
+            "Tax Rate(%)": "5.00",
+            "Product/Service Desc": "Hybrid Car Bodywork Service/Sydney",
+            "Record ID": "a0xIm000000DL6zIAG"
+        },
+        {
+            "Tax Code Master": [
+                {
+                    "Description": "Eco-friendly vehicles taxed at reduced GST",
+                    "Tax Code": "AU AP ECO VEHICLE",
+                    "Country Name": "Australia",
+                    "Tax Rate": "5.00"
+                },
+                {
+                    "Description": "Solar panels taxed at reduced GST (historical)",
+                    "Tax Code": "AU AP SOLAR PANEL HIST",
+                    "Country Name": "Australia",
+                    "Tax Rate": "5.00"
+                }
+            ],
+            "Tax Type": "VAT",
+            "Tax Rate(%)": "5.00",
+            "Product/Service Desc": "Solar Inverter Supply and Mounting",
+            "Record ID": "a0xIm000000DL70IAG"
+        }
+    ],
+    "Id": "a0zIm000000Pd14IAC",
+    "Invoice Date": "2019-06-09",
+    "Vendor Number": "315",
+    "Company Country": "Australia",
+    "Company Code": "AU15",
+    "Vendor country": "Australia"
+}
