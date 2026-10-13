@@ -1,0 +1,648 @@
+GRN Variance Analysis - Technical Documentation
+Use Case: Goods Receipt Note (GRN) Variance Analysis for Perishable Goods Payment Decisions
+
+1. Executive Summary
+1.1 Business Problem
+In supply chain and procurement operations, organizations frequently encounter discrepancies between invoice quantities (what vendors claim to have delivered) and GRN quantities (what was actually received). This variance is particularly critical for perishable goods where:
+
+Natural weight loss during transit is expected
+Seasonal variations affect acceptable variance thresholds
+Historical patterns determine what constitutes "normal" variance
+Buyers need data-driven recommendations to approve or investigate payments
+Manual variance analysis is time-consuming, inconsistent, and lacks the statistical rigor needed for informed payment decisions.
+
+1.2 Solution Overview
+The GRN Variance Analysis System is an AI-powered Azure Function that automatically analyzes invoice-to-GRN variances using historical data and LLM-based reasoning to provide actionable payment recommendations.
+
+Technique	Purpose
+Historical Data Analysis	Fetches past transaction records from SQL database
+Statistical Metrics	Calculates percentiles, trends, and seasonal patterns
+LLM Reasoning (Azure OpenAI)	Generates context-aware recommendations with justifications
+Trend Visualization	Provides 12-month rolling variance trends
+1.3 Key Capabilities
+Historical Context: Analyzes up to 2 years (configurable) of transaction history
+Statistical Analysis: Calculates mean, percentiles (5th, 25th, 50th, 75th, 95th), and seasonal patterns
+AI-Powered Recommendations: Uses Azure OpenAI to classify products and recommend thresholds
+Parallel Processing: Processes multiple line items concurrently using ThreadPoolExecutor
+Monthly Trends: Provides 12-month rolling variance trend data
+Dynamic Configuration: All field mappings and parameters are configurable via Azure Blob Storage
+Comprehensive Validation: Pydantic-based input/output schema validation
+2. System Architecture
+2.1 High-Level Architecture
+AI Services
+
+Post-Processing
+
+Analysis Components
+
+Processing Pipeline
+
+Data Layer
+
+Azure Functions Layer
+
+Client Layer
+
+POST /gr_variance
+
+JSON Response
+
+HTTP 200
+
+Client Application / ERP System
+
+Azure Function App
+(HTTP Trigger: /gr_variance)
+
+Azure Blob Storage
+(grnconfig/config.json)
+
+Azure SQL Server
+(GRN_Variance_History Table)
+
+SQL Query Module
+(Historical Data Fetch)
+
+Parallel Processing
+(ThreadPoolExecutor)
+
+Main Process
+(Per Line Item)
+
+Input Validation
+(Pydantic Schemas)
+
+Historical Analysis
+(Statistical Metrics)
+
+LLM Integration
+(Azure OpenAI)
+
+Output Validation
+(Schema Compliance)
+
+Trend Analysis
+(12-Month Rolling)
+
+Azure OpenAI
+(GPT Model)
+
+2.2 Data Flow Diagram
+Output
+
+LLM Analysis
+
+Parallel Processing
+
+Historical Enrichment
+
+Input
+
+Invoice Request
+
+Invoice Header
+
+Invoice Line Items
+
+Build Header Filters
+
+Build Line Filters
+
+SQL Query
+
+Historical Data
+
+Enriched Line Items
+
+Split by Line Item
+
+Process Line 1
+
+Process Line 2
+
+Process Line N
+
+Calculate Stats
+
+Generate Prompt
+
+Azure OpenAI Call
+
+Parse Response
+
+Merge Results
+
+Add Trend Data
+
+Final Response
+
+2.3 Technology Stack
+Layer	Technology	Purpose
+Runtime	Azure Functions (Python 3.11)	Serverless HTTP endpoint
+LLM	Azure OpenAI (GPT Models)	Variance analysis & recommendations
+Database	Azure SQL Server	Historical transaction storage
+Configuration	Azure Blob Storage	Dynamic config management
+Validation	Pydantic 2.x	Schema validation & type safety
+Data Processing	Pandas, NumPy	Statistical computations
+Concurrency	ThreadPoolExecutor	Parallel line item processing
+DB Connectivity	pyodbc	SQL Server connection
+3. Component Deep Dive
+3.1 Function App Entry Point
+File: function_app.py
+
+The main HTTP trigger that orchestrates the complete request lifecycle.
+
+FunctionApp
+
+-config: dict
+
+-blob_service_client: BlobServiceClient
+
++gr_variance(req: HttpRequest) : HttpResponse
+
++fetch_config(container, blob) : dict
+
++get_blob_service_client(conn_str) : BlobServiceClient
+
+Key Responsibilities:
+
+Fetch configuration from Azure Blob Storage at startup
+Validate incoming HTTP POST requests
+Orchestrate the three-stage processing pipeline:
+SQL Query Stage: Fetch historical data
+Parallel Processing Stage: Analyze each line item with LLM
+Trend Analysis Stage: Add monthly variance trends
+Handle errors and return structured responses
+3.2 SQL Query Module
+File: sql_query.py
+
+Handles all database operations for fetching historical GRN variance data.
+
+Key Functions:
+
+Function	Purpose
+connect_db()	Establishes connection to Azure SQL using Managed Identity (MSI)
+build_header_filters()	Creates SQL filters from invoice header fields
+build_line_item_filters()	Creates SQL filters for each line item
+fetch_filtered_rows()	Executes parameterized SQL queries
+add_historical_data()	Enriches each line item with historical records
+validation_check()	Validates request against config mappings
+main_sql()	Main orchestration function for SQL pipeline
+Connection Flow:
+
+Azure SQL
+sql_query.py
+Function App
+Azure SQL
+sql_query.py
+Function App
+main_sql(request, config)
+validation_check()
+connect_db() with MSI Auth
+Connection established
+build_header_filters()
+build_line_item_filters()
+Parameterized SELECT query
+Historical rows
+add_historical_data()
+Enriched request
+3.3 Main Processing Module
+File: main.py
+
+Central orchestrator for single invoice processing.
+
+ValidationError
+
+Success
+
+ProcessingError
+
+Success
+
+ValidationError
+
+Success
+
+Input Data
+
+input_validation
+
+Return Error
+
+process_invoice
+
+Return Error
+
+output_validation
+
+Return Error
+
+Return Success + Data
+
+Pipeline Steps:
+
+Input Validation: Validates request structure using dynamic Pydantic models
+Invoice Processing: Calculates variances and calls LLM for each line item
+Output Validation: Ensures response conforms to expected schema
+3.4 Parallel Processing Module
+File: parallel_call.py
+
+Handles concurrent processing of multiple invoice line items for improved performance.
+
+Key Functions:
+
+Function	Purpose
+invline_to_inv()	Splits single invoice into multiple single-line invoices
+process_invoices_in_parallel()	Processes line items using ThreadPoolExecutor
+merge_invoices()	Combines processed results back into single invoice
+main_parallel()	Main pipeline orchestrator
+Parallel Processing Flow:
+
+Invoice with N Line Items
+
+Split into N Invoices
+(1 line each)
+
+ThreadPoolExecutor
+(max_workers = min(batch_size, CPU*10))
+
+Process Invoice 1
+
+Process Invoice 2
+
+Process Invoice N
+
+Merge Results
+
+Single Response with N Results
+
+3.5 Invoice Processing Module
+File: process_invoice.py
+
+Core business logic for variance analysis and LLM integration.
+
+Key Functions:
+
+Function	Purpose
+process_invoice()	Processes all line items with business rules and LLM
+process_line_item()	Handles individual line item LLM analysis
+Business Rules Applied:
+
+Condition	Action
+Invoice Qty < GRN Qty	Skip analysis (favorable variance)
+Negative quantities	Skip analysis (data quality issue)
+No historical data	Skip LLM, return standard message
+Normal case	Perform full LLM analysis
+Variance Calculation:
+
+GRN Variance % = |((GRN Qty - Invoice Qty) / GRN Qty)| × 100
+3.6 Historical Analysis Metrics Module
+File: historical_analysis_metrics.py
+
+Generates comprehensive statistical analysis of historical variance data.
+
+Metrics Calculated:
+
+Metric	Description
+nHistoricalRecords	Total count of historical records
+grnVarianceMean	Average variance percentage
+grnVariancePercentiles	P5, P25, P50, P75, P95 percentiles
+grnVarianceMin	Minimum historical variance
+grnVarianceMax	Maximum historical variance
+grnVarianceMonthWise	Per-month statistics (seasonality analysis)
+Output Structure (JSON):
+
+{
+  "nHistoricalRecords": 41,
+  "grnVarianceMean": 3.5,
+  "grnVariancePercentiles": {
+    "p5": 0.5,
+    "p25": 1.2,
+    "p50": 2.8,
+    "p75": 4.5,
+    "p95": 8.2
+  },
+  "grnVarianceMin": 0.2,
+  "grnVarianceMax": 12.5,
+  "grnVarianceMonthWise": {
+    "January": {"grn_variance_monthly_quantiles": {...}, "grn_variance_monthly_max": 5.2, "count": 4},
+    "February": {"grn_variance_monthly_quantiles": {...}, "grn_variance_monthly_max": 6.1, "count": 3}
+  }
+}
+3.7 LLM Integration Module
+File: llm_call.py
+
+Handles Azure OpenAI API integration for generating variance recommendations.
+
+LLMIntegration
+
++get_azure_openai_client() : AzureOpenAI
+
++get_azure_openai_response(system_prompt, user_prompt) : Tuple[str, int]
+
+API Configuration:
+
+Parameter	Value
+Temperature	1 (creative responses)
+Max Completion Tokens	8192
+Response Format	Structured JSON
+Environment Variables Required:
+
+AZURE_OPENAI_ENDPOINT
+AZURE_OPENAI_API_KEY
+AZURE_OPENAI_API_VERSION
+AZURE_OPENAI_MODEL
+3.8 Trend Analysis Module
+File: variance_month.py
+
+Calculates 12-month rolling variance trends for visualization.
+
+Key Functions:
+
+Function	Purpose
+get_last_12_months()	Generates list of last 12 months from invoice date
+calculate_monthly_variance()	Aggregates variance by month
+merge_request()	Merges trend data with LLM response
+main_trend()	Main pipeline for trend calculation
+Output Format:
+
+{
+  "trend": [
+    {"month": "Jan", "year": "2025", "variance": "2.5%"},
+    {"month": "Feb", "year": "2025", "variance": "3.1%"},
+    {"month": "Mar", "year": "2025", "variance": "NA"}
+  ]
+}
+3.9 Validation Modules
+Input Validation (input_validation.py):
+
+Dynamically creates Pydantic models from configuration
+Validates invoice structure, line items, and historical data
+Supports field aliasing for Salesforce integration
+Output Validation (output_validation.py):
+
+Schema	Purpose
+LLMOutput	Validates LLM response structure
+InvoiceLineItemResults	Validates individual line item results
+FinalOutput	Validates complete response structure
+4. Process Flow & Sequence Diagrams
+4.1 Complete Request Lifecycle
+Trend Analysis
+Azure OpenAI
+Main Process
+SQL Server
+Blob Storage
+Azure Function
+Client
+Trend Analysis
+Azure OpenAI
+Main Process
+SQL Server
+Blob Storage
+Azure Function
+Client
+Startup: Load config
+Stage 1: SQL Query
+Stage 2: Parallel Processing
+par
+[Process Line 1]
+[Process Line 2]
+Stage 3: Trend Analysis
+POST /gr_variance
+Fetch config.json
+Configuration
+main_sql(request, config)
+Validate request fields
+Build header/line filters
+Enriched data + historical records
+main_parallel(data, config)
+input_validation()
+calculate_variance()
+historical_analysis_metrics()
+get_azure_openai_response()
+Recommendation + Justification
+output_validation()
+Same flow...
+Merged line item results
+main_trend(llm_response, request, config)
+calculate_monthly_variance()
+merge_request()
+Final response with trends
+HTTP 200 + JSON Response
+5. API Reference
+5.1 Request Schema
+{
+  "key": "INV-2025-001",
+  "Invoice_Date__c": "2025-01-15",
+  "Bill_To_Country__c": "AR",
+  "AP_Vendor_Code__c": "V0001",
+  "Invoice_Line_Item__c": [
+    {
+      "ID": "LINE-001",
+      "Product/Service Desc": "Maíz Dulce Grano Entero / ZC-KRN SWTCN 425g",
+      "Product/Service No.": "789012",
+      "Qty": 1000,
+      "Total Multiple GRN Qty": 700,
+      "UOM": "KG"
+    },
+    {
+      "ID": "LINE-002",
+      "Product/Service Desc": "Fresh Strawberries Premium Grade",
+      "Product/Service No.": "789013",
+      "Qty": 500,
+      "Total Multiple GRN Qty": 480,
+      "UOM": "KG"
+    }
+  ]
+}
+5.2 Response Schema
+Success (200 OK):
+
+{
+  "status": "success",
+  "status_code": 200,
+  "vendorID": "V0001",
+  "invoiceID": "INV-2025-001",
+  "invoiceDate": "2025-01-15",
+  "invoiceLineItemsResults": [
+    {
+      "invoiceLineID": "LINE-001",
+      "materialDescription": "Maíz Dulce Grano Entero / ZC-KRN SWTCN 425g",
+      "materialID": "789012",
+      "variance": "4.5",
+      "justification": "Sweet corn (non-perishable, likely canned) using 95th percentile threshold of 4.0% from 41 annual samples. Current variance 4.5% slightly exceeds threshold, recommended to investigate.",
+      "trend": [
+        {"month": "Jan", "year": "2025", "variance": "3.2%"},
+        {"month": "Dec", "year": "2024", "variance": "2.8%"},
+        {"month": "Nov", "year": "2024", "variance": "NA"}
+      ]
+    },
+    {
+      "invoiceLineID": "LINE-002",
+      "materialDescription": "Fresh Strawberries Premium Grade",
+      "materialID": "789013",
+      "variance": "",
+      "justification": "No variance analysis as GRN quantity is greater than invoice quantity.",
+      "trend": [...]
+    }
+  ]
+}
+Error Response (400/500):
+
+{
+  "status": "error",
+  "status_code": 400,
+  "message": "Issue found in SQL query execution: Missing required header field: AP_Vendor_Code__c"
+}
+5.3 Field Mapping Reference
+Request Field	Internal Field	Description
+key	invoiceID	Unique invoice identifier
+Invoice_Date__c	invoiceDate	Invoice date (YYYY-MM-DD)
+Bill_To_Country__c	country	Country code
+AP_Vendor_Code__c	vendorID	Vendor identifier
+Invoice_Line_Item__c	invoiceLineItems	Array of line items
+ID	invoiceLineID	Line item identifier
+Product/Service Desc	materialDescription	Material description
+Product/Service No.	materialID	Material ID
+Qty	invoiceQuantity	Invoice quantity
+Total Multiple GRN Qty	grnQuantity	GRN quantity
+UOM	uom	Unit of measure
+6. Configuration Guide
+6.1 Configuration File (config.json)
+The configuration is stored in Azure Blob Storage at grnconfig/config.json. Eg:
+
+{
+  "header_mapping": {
+    "AP_Vendor_Code__c": "vendorId"
+  },
+  "line_detail_mapping": {
+    "Product/Service Desc": "productName",
+    "UOM": "uom"
+  },
+  "filter_field_name": ["productName", "vendorId", "uom"],
+  "all_field_to_fetch": ["invoiceQuantity", "grnQuantity", "invoiceDate", "uom"],
+  "grn_qty_field_in_line_detail": "Total Multiple GRN Qty",
+  "invoice_line_field_name": "Invoice_Line_Item__c",
+  "invoice_line_id_field_identifier": "ID",
+  "invoice_date_field": "Invoice_Date__c",
+  "table_name": "GRN_Variance_History",
+  "batch_size_for_parellel_processing": 10,
+  "date_field_in_database": "invoiceDate",
+  "historical_data_duration": 730,
+  "common_name_to_table_field": {
+    "inv_qty": "invoiceQuantity",
+    "grn_qty": "grnQuantity",
+    "inv_date": "invoiceDate",
+    "uom": "uom"
+  },
+  "LLM_to_salesforce_key_mapping": {
+    "invoiceID": "key",
+    "invoiceDate": "Invoice_Date__c",
+    "country": "Bill_To_Country__c",
+    "vendorID": "AP_Vendor_Code__c",
+    "invoiceLineID": "ID",
+    "materialDescription": "Product/Service Desc",
+    "materialID": "Product/Service No.",
+    "invoiceQuantity": "Qty",
+    "grnQuantity": "Total Multiple GRN Qty",
+    "uom": "UOM",
+    "invoiceLineItems": "Invoice_Line_Item__c"
+  },
+  "LLM_to_History_key_mapping": {
+    "invoiceQuantity": "invoiceQuantity",
+    "grnQuantity": "grnQuantity",
+    "invoiceDate": "invoiceDate",
+    "uom": "uom"
+  },
+  "grn_variance_system_prompt": "<Your system prompt for LLM>",
+  "grn_variance_user_prompt": "<Your user prompt template with placeholders>"
+}
+6.2 Parameter Reference
+Database & Query Parameters
+Parameter	Type	Description
+table_name	string	SQL table containing historical GRN data
+header_mapping	object	Maps request header fields to DB columns
+line_detail_mapping	object	Maps line item fields to DB columns
+filter_field_name	array	Fields used in SQL WHERE clause
+all_field_to_fetch	array	Fields to SELECT from database
+historical_data_duration	int	Days of historical data to consider (default: 730 = 2 years)
+Processing Parameters
+Parameter	Type	Description
+batch_size_for_parellel_processing	int	Max concurrent line items to process
+invoice_line_field_name	string	Key containing line items array
+invoice_line_id_field_identifier	string	Unique identifier field for line items
+invoice_date_field	string	Request field containing invoice date
+grn_qty_field_in_line_detail	string	Field containing GRN quantity
+Field Mapping Parameters
+Parameter	Type	Description
+LLM_to_salesforce_key_mapping	object	Maps internal fields to Salesforce field names
+LLM_to_History_key_mapping	object	Maps internal fields to historical data fields
+common_name_to_table_field	object	Maps common names to database column names
+LLM Parameters
+Parameter	Type	Description
+grn_variance_system_prompt	string	System prompt for Azure OpenAI
+grn_variance_user_prompt	string	User prompt template with placeholders
+User Prompt Placeholders:
+
+{material_description} - Product description
+{invoice_quantity} - Current invoice quantity
+{grn_quantity} - Current GRN quantity
+{grn_variance} - Calculated variance percentage
+{uom} - Unit of measure
+{country} - Country code
+{invoice_date} - Invoice date
+{eda_report} - Statistical analysis JSON
+7. Installation & Setup
+7.1 Local Development Setup
+# 1. Clone repository
+git clone <repo-url>
+cd gr_variance
+
+# 2. Create virtual environment
+python -m venv .venv
+
+# 3. Activate virtual environment
+# Windows:
+.venv\Scripts\activate
+# Linux/Mac:
+source .venv/bin/activate
+
+# 4. Install dependencies
+pip install -r requirements.txt
+
+# 5. Create local.settings.json (see section 7.3)
+
+# 6. Run locally
+func host start
+7.2 Environment Variables
+Create or update .env for local development:
+
+{
+    "SQL_SERVER": "<your-sql-server>.database.windows.net",
+    "SQL_DATABASE": "<your-database-name>",
+    
+    "AZURE_OPENAI_ENDPOINT": "https://<your-resource>.openai.azure.com/",
+    "AZURE_OPENAI_API_KEY": "<your-api-key>",
+    "AZURE_OPENAI_API_VERSION": "2024-02-15-preview",
+    "AZURE_OPENAI_MODEL": "<your-deployment-name>"
+}
+7.3 Dependencies
+File: requirements.txt
+
+azure-functions
+pyodbc==5.2.0
+azure-storage-blob==12.3.0
+openai==1.108.0
+pydantic==2.11.9
+pandas==2.3.2
+numpy==2.2.6
+
+
+
+
+
+
+
+
+
+
