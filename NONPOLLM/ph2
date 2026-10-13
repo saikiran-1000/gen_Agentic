@@ -1,0 +1,459 @@
+Non-PO Invoice Phase 2 
+
+ 
+
+ 
+
+Introduction 
+
+This document outlines the expected sample input and output formats for phase -2 of NON PO invoice coding that contains: 
+
+Non PO invoice GL category with explanation 
+
+Non-PO Invoice Similar Line Description Classification 
+
+Non PO invoice GL category with explanation 
+
+Overview 
+
+This section outlines the expected sample input and output formats for the Non PO invoice use case pipeline. The pipeline is designed to automate the process for identifying the suitable GL category(s) based on the invoice description and short description of each GL category. The pipeline expects one invoice in the request, processes it and generates the output.  
+
+Sample Input Format 
+
+The pipeline expects the following input JSON structure for each invoice: 
+
+{   
+
+  "invoiceID": "INV12345",   
+
+  "invoiceDate": "2025-04-08",      //(YYYY-MM-DD)   
+
+  "approverName": "approver",   
+
+  "vendorID": "5000367",   
+
+  "masterGLCategories" : [ 
+
+   { 
+
+       “glCategory”: “Custodial Services”, 
+
+      “glCategoryExplanation”: “Contracted janitorial or cleaning vendor payments”}, 
+
+{ 
+
+       “glCategory”: “Cleaning Services”, 
+
+        “glCategoryExplanation”: “Services for cleaning/sanitation”}, 
+
+{ 
+
+    “glCategory”: “Accounts Payable – Intercompany”, 
+
+   “glCategoryExplanation”: “Intercompany service or management fee payables”}, 
+
+{	    
+
+   “glCategory”: “Communication Expenses”, 
+
+   	  “glCategoryExplanation”: “Communication software subscriptions”}, 
+
+{ 
+
+    “glCategory”: "Travel Expense", 
+
+   “glCategoryExplanation”: “various costs incurred during business travel”}, 
+
+{	    
+
+   “glCategory”: “IT serivices”, 
+
+   	  “glCategoryExplanation”: “Fees paid for external IT support and maintenance services.”}, 
+
+], 
+
+  "invoiceLineItems": [   
+
+      {   
+
+        "invoiceLineID": "9426589217",   
+
+        "lineDescription": " Window washing – Building B "          
+
+      } , 
+
+      {   
+
+        "invoiceLineID": "94214382247",   
+
+        "lineDescription": " INTER-COMM: COSTS/charg, C:1805 "             
+
+      } 
+
+    ]   
+
+}  
+
+  
+
+Key Fields: 
+
+invoiceID: Unique identifier for the invoice. 
+
+invoiceDate: Date of the invoice (YYYY-MM-DD). 
+
+approverName: Approver assigned to the invoice 
+
+vendorID: Unique identifier for the vendor 
+
+masterGLCategories : Exhaustive list of all GL categories that are present in the master data along with their explanation 
+
+glCategory: GL category from the master data 
+
+glCategoryExplanation: Short description to explain what type of expense goes into that GL category 
+
+invoiceLineItems: List of items on the invoice, each with: 
+
+invoiceLineID: Unique identifier for each line description 
+
+lineDescription: Description of the invoice line 
+
+ 
+
+Sample Output Format 
+
+The pipeline will return the list of identified categories for each invoice line item in the following JSON format: 
+
+{  
+
+  "invoiceID": "INV12345",   
+
+  "invoiceDate": "2025-04-08",      //(YYYY-MM-DD)   
+
+  "vendorID": "5000367", 
+
+  "approverName": "approver",   
+
+  "invoiceLineItemsResults": [ 
+
+    { 
+
+      "invoiceLineID": "9426589217", 
+
+      "lineDescription": "Window washing – Building B", 
+
+      "glCategories": ["Cleaning Services ",” Custodial Services”] 
+
+ 
+
+     }, 
+
+    { 
+
+    "invoiceLineID": "94214382247",    
+
+    "lineDescription": " INTER-COMM: COSTS/charg, C:1805 ",     
+
+    "glCategories": ["Accounts Payables – Intercompany"] 
+
+      } 
+
+ ] 
+
+} 
+
+ 
+
+ 
+
+Fields: 
+
+invoiceLineItemsResults: A list containing the result for each invoice line item. 
+
+invoiceLineID: Unique identifier for the invoice line item. 
+
+invoiceDate: Date of the invoice (YYYY-MM-DD). 
+
+vendorID: Unique identifier for the vendor 
+
+lineDescription: Description of the line as given by the input 
+
+glCategories: List of all GL categories (one or more) that is suitable for the given line description 
+
+Non-PO Invoice Similar Line Description Classification 
+
+ 
+
+Overview 
+
+This section outlines the expected sample input and output formats for the Non PO invoice use case pipeline. The pipeline is designed to automate the process for identifying the closest historical invoice line description, when present, based on the current invoice description. If there is no relevant description found, then it outputs “NA”. The pipeline expects one invoice in the request, processes it and generates the output.  
+
+NOTE: The pipeline will be called only when there is no exact match found in the historical data 
+
+Sample Input Format 
+
+The pipeline expects the following input JSON structure for each invoice: 
+
+{   
+
+  "invoiceID": "INV12345",   
+
+  "invoiceDate": "2025-04-08",      //(YYYY-MM-DD)   
+
+  "approverName": "approver",   
+
+  "vendorID": "5000367",   
+
+  "invoiceLineItems": [   
+
+      {   
+
+        "invoiceLineID": "9426589217",   
+
+        "lineDescription": " Window washing – Building B ". 
+
+        “historicallyMatchedLineDescriptions”: [ 
+
+  { 
+
+         “glCategory”: “Cleaning Services”, 
+
+        “glCategoryExplanation”: “Services for cleaning/sanitation”, 
+
+        “lineDescriptions”: [ 
+
+{ 
+
+“matchedLineDescription”: “Window cleaning”,  
+
+“score”: 0.9 
+
+}, 
+
+{ 
+
+“matchedLineDescription”: “Floor washing”,  
+
+“score”: 0.83 
+
+}, 
+
+{ 
+
+“matchedLineDescription”: “Sanitary cleaning”, 
+
+“score”: 0.8 
+
+} 
+
+         ] 
+
+     	    } , 
+
+   { 
+
+       “glCategory”: “Custodial Services”, 
+
+      “glCategoryExplanation”: “Contracted janitorial or cleaning vendor payments”, 
+
+“lineDescriptions”: [ 
+
+{ 
+
+“matchedLineDescription”: “Cleaning and trash removal”,  
+
+“score”: 0.6 
+
+}, 
+
+{ 
+
+“matchedLineDescription”: “Night shift support”,  
+
+“score”: 0.58 
+
+}, 
+
+{ 
+
+“matchedLineDescription”: “Daily  cleaning labor” 
+
+“score”: 0.54 
+
+} 
+
+           ] 
+
+                     } 
+
+              ] 
+
+        }, 
+
+      {   
+
+        "invoiceLineID": "94214382247",   
+
+        "lineDescription": " TRUCK-COMM: COSTS/charg, C:1805 " , 
+
+        “historicallyMatchedLineDescriptions”: [ 
+
+{ 
+
+    “glCategory”: “Accounts Payable – Intercompany”, 
+
+   “glCategoryExplanation”: “Intercompany service or management fee payables”, 
+
+    “lineDescriptions”: [ 
+
+{ 
+
+“matchedLineDescription”: “Intercompany service charge”,  
+
+“score”: 0.78 
+
+}, 
+
+{ 
+
+“matchedLineDescription”: “Intercompany rent  allocation”, 
+
+“score”: 0.74 
+
+} 
+
+         ] 
+
+   }, 
+
+  { 
+
+   “glCategory”: “Communication Expenses”, 
+
+   	  “glCategoryExplanation”: “Communication software subscriptions”, 
+
+  “lineDescriptions”: [ 
+
+{ 
+
+“matchedLineDescription”: “Recharge Reimbursements”,  
+
+“score”: 0.38 
+
+}, 
+
+{ 
+
+“matchedLineDescription”: “Postal Charges”,  
+
+“score”: 0.34 
+
+}, 
+
+{ 
+
+“matchedLineDescription”: “Field radio  costs”, 
+
+“score”: 0.30 
+
+} 
+
+    ] 
+
+} 
+
+           ] 
+
+      } 
+
+   ]   
+
+}  
+
+  
+
+Key Fields: 
+
+invoiceID: Unique identifier for the invoice. 
+
+invoiceDate: Date of the invoice (YYYY-MM-DD). 
+
+approverName: Approver assigned to the invoice 
+
+vendorID: Unique identifier for the vendor 
+
+masterGLCategories: Exhaustive list of all GL categories that are present in the master data 
+
+glCategoryExplanation: The explanation for the GL category. 
+
+invoiceLineItems: List of items on the invoice, each with: 
+
+invoiceLineID: Unique identifier for each line description 
+
+lineDescription: Description of the invoice line 
+
+historicallyMatchedLineDescriptions: A list of items retrieved from Azure AI search using embedding match, each with: 
+
+glCategory: The GL Category for which the historical Invoice Line Descriptions have been retrieved 
+
+lineDescriptions: List of items, each containing a matched historical Invoice Line Description and the corresponding similarity score retrieved using embedding match. 
+
+ 
+
+Sample Output Format 
+
+The pipeline will return the most semantically similar line item for each invoice line item in the following JSON format: 
+
+ 
+
+{  
+
+  "invoiceID": "INV12345",   
+
+  "invoiceDate": "2025-04-08",      //(YYYY-MM-DD)   
+
+  "vendorID": "5000367", 
+
+  "approverName": "approver",   
+
+  "invoiceLineItemsResults": [ 
+
+    { 
+
+      "invoiceLineID": "9426589217", 
+
+      "lineDescription": "Window washing – Building B", 
+
+      "matchingLineDescription": “Window Cleaning” 
+
+     }, 
+
+    { 
+
+    "invoiceLineID": "94214382247",    
+
+    "lineDescription": " TRUCK-COMM: COSTS/charg, C:1805 ",     
+
+    " matchingLineDescription ": “NA” 
+
+      } 
+
+   ] 
+
+} 
+
+Fields: 
+
+invoiceLineItemsResults: A list containing the result for each invoice line item. 
+
+invoiceLineID: Unique identifier for the invoice line item. 
+
+invoiceDate: Date of the invoice (YYYY-MM-DD). 
+
+vendorID: Unique identifier for the vendor 
+
+lineDescription: Description of the line as given by the input 
+
+matchingLineDescription: The Line description given by the LLM that is most similar to the input Invoice Line Description if present else “NA” 
+
+ 
