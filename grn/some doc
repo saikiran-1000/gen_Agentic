@@ -1,0 +1,191 @@
+GRN Variance Detection 
+
+Overview 
+
+This document describes the required sample input and output formats for the Goods Receipt Note (GRN) use case pipeline. The pipeline automates the decision-making process for accepting or rejecting vendor invoices for perishable goods, based on the variance between the invoiced quantity and the received (GRN) quantity. Acceptance or rejection is determined by referencing historical data to define acceptable tolerance ranges. The pipeline processes one invoice per request and generates the corresponding output. 
+
+Sample Input Format 
+
+The pipeline expects the following input JSON structure for an invoice: 
+
+{ 
+
+    "invoiceID": "INV12345", 
+
+    "invoiceDate": "2025-04-08", 
+
+    "country": "US", 
+
+    "vendorID": "5000367", 
+
+    "invoiceLineItems": [ 
+
+        { 
+
+            "invoiceLineID": "a290tevb278367", 
+
+            "materialDescription": "Apple", 
+
+            "materialID": "6863902", 
+
+            "invoiceQuantity": 460, 
+
+            "grnQuantity": 400, 
+
+            "uom": "kg", 
+
+            "historicalData": [ 
+
+                { 
+
+                    "invoiceDate": "2024-12-10", 
+
+                    "invoiceQuantity": 410, 
+
+                    "grnQuantity": 390, 
+
+                    "uom": "kg" 
+
+                }, 
+
+                { 
+
+                    "invoiceDate": "2024-11-05", 
+
+                    "invoiceQuantity": 470, 
+
+                    "grnQuantity": 450, 
+
+                    "uom": "kg" 
+
+                } 
+
+            ] 
+
+        }, 
+
+        { 
+
+            "invoiceLineID": "b390xkqw983245", 
+
+            "materialDescription": "Penne rigate seco, caja 5kg", 
+
+            "materialID": "7845123", 
+
+            "invoiceQuantity": 120, 
+
+            "grnQuantity": 120, 
+
+            "uom": "BOX", 
+
+            "historicalData": [ 
+
+                { 
+
+                    "invoiceDate": "2024-10-15", 
+
+                    "invoiceQuantity": 100, 
+
+                    "grnQuantity": 100, 
+
+                    "uom": "BOX" 
+
+                }, 
+
+                { 
+
+                    "invoiceDate": "2024-09-12", 
+
+                    "invoiceQuantity": 110, 
+
+                    "grnQuantity": 110, 
+
+                    "uom": "BOX" 
+
+                } 
+
+            ] 
+
+        } 
+
+    ] 
+
+} 
+
+Key Fields: 
+
+invoiceID: Unique identifier for the invoice. 
+
+invoiceDate: Date of the invoice (YYYY-MM-DD). 
+
+country: Country where the transaction occurred. 
+
+vendorID: Unique vendor identifier. 
+
+invoiceLineItems: List of items on the invoice, each with: 
+
+invoiceLineID 
+
+materialDescription 
+
+materialID 
+
+invoiceQuantity: Quantity billed by the vendor. 
+
+grnQuantity: Quantity received and recorded. 
+
+uom: Unit of Measurement 
+
+ 
+
+Sample Output Format 
+
+The pipeline will return its decision and justification for each invoice line item in the following JSON format: 
+
+{ 
+
+  "vendorID": "5000367", 
+
+  "invoiceLineItemsResults": [ 
+
+    { 
+
+      "invoiceLineID": "a290tevb278367", 
+
+      "materialDescription": "Apple", 
+
+      "materialID": "6863902", 
+
+      "variance": "1.2%", 
+
+      "justification": "<reason for acceptance/rejection and threshold variance information>" 
+
+    }, 
+
+    { 
+
+      "invoiceLineID": "b390xkqw983245", 
+
+      "materialDescription": "Penne rigate seco, caja 5kg", 
+
+      "materialID": "7845123", 
+
+      "variance": "0.0%", 
+
+      "justification": "<reason for acceptance/rejection and threshold variance information>" 
+
+    } 
+
+  ] 
+
+} 
+
+ 
+
+Fields: 
+
+invoiceLineItemsResults: A list containing the result for each invoice line item. 
+
+invoiceLineID: Unique identifier for the invoice line item. 
+
+justification: Explains the decision, including reference to data-driven tolerance ranges. 
