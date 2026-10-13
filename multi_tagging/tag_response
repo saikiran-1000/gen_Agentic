@@ -1,0 +1,170 @@
+[
+    {
+        "InvoiceLineItemNumber": "INVL-04600249",
+        "PurchaseOrderNumber": "POL-00113324",
+        "MatchPercentage": 76,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Exact product/service description matches PO line text.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600245",
+        "PurchaseOrderNumber": "POL-00113321",
+        "MatchPercentage": 77,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Invoice description exactly equals PO line description.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600248",
+        "PurchaseOrderNumber": "POL-00113322",
+        "MatchPercentage": 72,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Exact product/maintenance description match with PO line.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600261",
+        "PurchaseOrderNumber": "POL-00113330",
+        "MatchPercentage": 73,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Product number/description exactly matches the PO line.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600241",
+        "PurchaseOrderNumber": "POL-00113363",
+        "MatchPercentage": 72,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Exact Product/Service Desc match; choose first PO when multiple exacts.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600243",
+        "PurchaseOrderNumber": "POL-00113318",
+        "MatchPercentage": 74,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Exact Product/Service Desc match; selected highest scoring and first occurrence.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600267",
+        "PurchaseOrderNumber": "POL-00113358",
+        "MatchPercentage": 49,
+        "MatchingReason": "{'rule_applied': 'SEMANTIC_MATCH', 'semantic_strength': 'strong', 'reasoning_summary': 'Contract number matches and date ranges semantically align; selected first strong PO.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600263",
+        "PurchaseOrderNumber": "POL-00113355",
+        "MatchPercentage": 56,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Product/Service number CON-BCSO-OP exactly matches PO line'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600264",
+        "PurchaseOrderNumber": "POL-00113356",
+        "MatchPercentage": 65,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Product/Service number CON-BCSO-OP exactly matches PO line'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600247",
+        "PurchaseOrderNumber": "POL-00113322",
+        "MatchPercentage": 72,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Exact product/service description matches PO line.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600250",
+        "PurchaseOrderNumber": "POL-00113324",
+        "MatchPercentage": 76,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Invoice description exactly matches PO line description.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600242",
+        "PurchaseOrderNumber": "POL-00113354",
+        "MatchPercentage": 76,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Identical asset management service description on PO.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600265",
+        "PurchaseOrderNumber": "POL-00113359",
+        "MatchPercentage": 71,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Exact product/service description matches PO line.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600246",
+        "PurchaseOrderNumber": "POL-00113321",
+        "MatchPercentage": 77,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Exact product description matches multiple POs; first occurrence chosen.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600266",
+        "PurchaseOrderNumber": "POL-00113360",
+        "MatchPercentage": 55,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Product/Service No. exactly matches CON-BCSOS-EAAS-SA on PO; first listed chosen.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600257",
+        "PurchaseOrderNumber": "POL-00113322",
+        "MatchPercentage": 65,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Invoice Product/Service No. matches PO line CON-ECMU-1SWSS; first occurrence chosen.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600252",
+        "PurchaseOrderNumber": "POL-00113363",
+        "MatchPercentage": 46,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Invoice Product/Service No. CON-CAMSP-ST maps to PO SMARTNET CON-SNT-1 exact code present; first occurrence chosen.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600251",
+        "PurchaseOrderNumber": "POL-00113316",
+        "MatchPercentage": 64,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Invoice Product/Service No. CON-SNT-1 exactly matches PO line; first matching PO chosen.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600244",
+        "PurchaseOrderNumber": "POL-00113318",
+        "MatchPercentage": 74,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Exact product/service description matches PO line exactly.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600255",
+        "PurchaseOrderNumber": "POL-00113328",
+        "MatchPercentage": 46,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Invoice product number exactly matches PO line product code.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600256",
+        "PurchaseOrderNumber": "POL-00113329",
+        "MatchPercentage": 46,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Invoice product number exactly matches PO line product code.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600258",
+        "PurchaseOrderNumber": "POL-00113323",
+        "MatchPercentage": 65,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Product/Service No. matches exactly CON-ECMU-1SWSS.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600262",
+        "PurchaseOrderNumber": "POL-00113331",
+        "MatchPercentage": 73,
+        "MatchingReason": "{'rule_applied': 'EXACT_PRODUCT_NUMBER', 'semantic_strength': 'strong', 'reasoning_summary': 'Product/Service No. SD-AR1K-N540XACY matches PO line description exactly.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600268",
+        "PurchaseOrderNumber": "POL-00113357",
+        "MatchPercentage": 49,
+        "MatchingReason": "{'rule_applied': 'SEMANTIC_MATCH', 'semantic_strength': 'strong', 'reasoning_summary': 'Dates and service description closely match expert-as-a-service period.'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600259",
+        "PurchaseOrderNumber": "null",
+        "MatchPercentage": 0,
+        "MatchingReason": "{'rule_applied': 'NO_MATCH', 'semantic_strength': 'weak', 'reasoning_summary': 'Product/Service Number did not match any PO; no semantic match strong enough'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600253",
+        "PurchaseOrderNumber": "null",
+        "MatchPercentage": 0,
+        "MatchingReason": "{'rule_applied': 'NO_MATCH', 'semantic_strength': 'weak', 'reasoning_summary': 'Product/Service Number did not match any PO; no semantic match strong enough'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600260",
+        "PurchaseOrderNumber": "null",
+        "MatchPercentage": 0,
+        "MatchingReason": "{'rule_applied': 'NO_MATCH', 'semantic_strength': 'weak', 'reasoning_summary': 'Product/Service Number did not match any PO; no semantic match strong enough'}"
+    },
+    {
+        "InvoiceLineItemNumber": "INVL-04600254",
+        "PurchaseOrderNumber": "null",
+        "MatchPercentage": 0,
+        "MatchingReason": "{'rule_applied': 'NO_MATCH', 'semantic_strength': 'weak', 'reasoning_summary': 'Product/Service Number did not match any PO; no semantic match strong enough'}"
+    }
+]
