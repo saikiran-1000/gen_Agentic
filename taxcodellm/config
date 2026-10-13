@@ -1,0 +1,147 @@
+{
+    "batch_size_for_parellel_processing": 10,
+    "AzureAIConfig": {
+        "index_name": "taxcode_client9",
+        "key_field": "invoiceLineID",
+        "searchable": [
+            "lineItemDescription"
+        ],
+        "filterable": [
+            "companyCode",
+            "companyCountry",
+            "vendorNumber",
+            "vendorCountry",
+            "taxPercent",
+            "taxCode",
+            "invoiceDate"
+        ],
+        "facetable": [],
+        "retrievable": [
+            "invoiceLineID",
+            "invoiceDate",
+            "lineItemDescription",
+            "companyCode",
+            "invoiceID",
+            "companyCountry",
+            "vendorNumber",
+            "vendorCountry",
+            "taxPercent",
+            "taxCode",
+            "vendorClusterDescription"
+        ],
+        "storage_only": [
+            "invoiceID",
+            "vendorClusterDescription"
+        ],
+        "vector_fields": {
+            "embedding": {
+                "dimensions": 1536
+            }
+        },
+        "relevant_fields": [
+            "invoiceLineID",
+            "companyCode",
+            "invoiceID",
+            "lineItemDescription",
+            "companyCountry",
+            "vendorNumber",
+            "vendorCountry",
+            "taxPercent",
+            "taxCode",
+            "vendorClusterDescription",
+            "invoiceDate"
+        ]
+    },
+    "salesforce_to_icd_mapping": {
+        "header": {
+            "Id": "invoiceID",
+            "Company Country": "companyCountry",
+            "Company Code": "companyCode",
+            "Vendor Number": "vendorNumber",
+            "Vendor country": "vendorCountry",
+            "Invoice Date": "invoiceDate",
+            "Invoice Line Item": "invoiceLineItems"
+        },
+        "line_detail": {
+            "Record ID": "invoiceLineID",
+            "Product/Service Desc": "lineItemDescription",
+            "Tax Rate(%)": "taxPercent",
+            "Tax Type": "taxType",
+            "Tax Code Master": "taxMasterDataLineItems",
+            "withoutRuleCodes": "withoutRuleCodes"
+        },
+        "tax_master": {
+            "Tax Rate": "taxPercent",
+            "Country Name": "companyCountry",
+            "Tax Code": "taxCode",
+            "Description": "taxCodeDescription"
+        }
+    },
+    "mandatory_fields": [
+        "lineItemDescription"
+    ],
+    "apply_filter_on_this_fields": {
+        "header": [
+            "companyCode",
+            "companyCountry"
+        ],
+        "line_detail": [
+            "lineItemDescription"
+        ],
+        "master_data": [
+            "taxCode"
+        ]
+    },
+    "field_to_extract_from_master_data": "taxCode",
+    "embedding_model": "text-embedding-3-small",
+    "delete_existing": "yes",
+    "line_detail_identifier_in_input": "invoiceLineItems",
+    "master_data_identifier_in_input": "taxMasterDataLineItems",
+    "number_of_historical_data_needed": 500,
+    "required_unique_field": "lineItemDescription",
+    "arrangement_field": "invoiceDate",
+    "is_arrangement_field_is_datetime_field": "yes",
+    "only_unique_description": "no",
+    "header_mapping": {
+        "invoiceID": "invoiceID",
+        "companyCountry": "companyCountry",
+        "companyCode": "companyCode",
+        "vendorNumber": "vendorNumber",
+        "vendorCountry": "vendorCountry"
+    },
+    "line_detail_mapping": {
+        "invoiceLineID": "invoiceLineID",
+        "lineItemDescription": "lineItemDescription",
+        "taxPercent": "taxPercent"
+    },
+    "VAT_master_data_mapping": {
+        "taxPercent": "taxPercent",
+        "companyCountry": "companyCountry",
+        "taxCode": "taxCode",
+        "taxCodeDescription": "taxCodeDescription"
+    },
+    "LLM_to_History_key_mapping": {
+        "invoiceLineID": "invoiceLineID",
+        "lineItemDescription": "lineItemDescription",
+        "invoiceDate": "invoiceDate",
+        "score": "score",
+        "taxCode": "taxCode"
+    },
+    "field_to_match_for_confidence_score": {
+        "vendorNumber": "vendorNumber"
+    },
+    "withoutRuleCodes_threshold": 0.6666666666666666,
+    "invoiceLineItems": "invoiceLineItems",
+    "k_r_coefficient_for_recency_calculation": 0.05,
+    "weightage_for_confidence_score_calculation": {
+        "score": 0.45,
+        "param_match": 0.25,
+        "w_freq": 0.2,
+        "w_recency": 0.1
+    },
+    "max_to_choose": "yes",
+    "MAX_RETRIES": 3,
+    "RETRY_BACKOFF_FACTOR": 2,
+    "tax_coding_system_prompt": "You are an expert AI Tax Identification Analyst. Your task is to review invoice line items and recommend the most appropriate 'taxCode' by strictly applying the following rules and logic:\n### RULES & DECISION LOGIC:\nValid Scope: For each line item, ONLY select tax codes present in the taxMasterDataLineItems list; discard any codes not in this list. Similarity Match: Analyze historicalData to find entries with descriptions semantically similar to the current line item; ignore unrelated records. Recency & Frequency Priority: Recency is primary—select the code(s) with the most recent invoiceDate (DD/MM/YYYY) among matched historical entries, reflecting possible changes in tax law; Frequency is secondary—if two or more codes are equally recent (dates within 30 days), use repeatOccurances as a tiebreaker. Handling Ambiguity: If multiple codes are equally valid (similar descriptions and equally recent dates) and cannot be decisively chosen, return ALL (e.g., 'Code A, Code B'). No Match: If no relevant historical data exists, return 'No recommendation for tax-code'.\n### PROCESSING ALGORITHM:\nFILTER (Semantic Search): From historicalData, find entries semantically similar to the current line item's description and discard unrelated entries. VALIDATE (Master Data Check): Remove any historical codes not present in taxMasterDataLineItems. RANK (Recency Rule): From remaining candidates, select the code(s) with the most recent invoiceDate; if multiple codes are within 30 days, use repeatOccurances to break the tie. DECIDE: If one code wins on recency, return that code; if multiple codes are equally recent and valid, and indistinguishable, return all, comma-separated; if no relevant history, return 'No recommendation for tax-code'.\n### OUTPUT REQUIREMENTS:\nReturn ONLY a valid JSON object.\n- `justification`: Must be concise (Max 3 lines). Explain the selection based on similarity, recency, and frequency. If multiple codes are selected, explain why they are indistinguishable.\n\n### RESPONSE FORMAT:\n{\n  \"invoiceID\": \"<ID>\",\n  \"invoiceLineItemsResults\": [\n{\n\"invoiceLineID\": \"<ID>\",\n\"taxCodeRecommendation\": \"<Selected Code(s)>\",\n      \"justification\": \"<Reasoning>\"\n    }\n  ]\n}",
+    "tax_coding_user_prompt": "### INPUT DATA EXPLANATION:\nThe input JSON contains `invoiceLineItems`. Inside each item, the `historicalData` has been pre-processed:\n- `repeatOccurances`: The total count of past transactions for this specific description and tax code.\n- `invoiceDate`: The **most recent** date this specific description and tax code were used together.\n\n### FEW-SHOT EXAMPLES:\n\n**Scenario 1: Recency Overrides Frequency**\n*Context*: 'Consulting Services'. History shows 'S1' used 500 times (last used 2015) and 'S2' used 10 times (last used 2024).\n*Recommendation*: \"S2\"\n*Justification*: \"Selected 'S2' as it is the most recently used code (2024) for this description, indicating a process change, despite 'S1' having higher historical volume (2015).\"\n\n**Scenario 2: Ambiguity / Multiple Recommendations**\n*Context*: 'Software License'. History shows 'L1' (Standard) and 'L2' (Cloud) both used in the current month with similar descriptions.\n*Recommendation*: \"L1, L2\"\n*Justification*: \"Unable to distinguish based on vague description 'Software License'. Both 'L1' and 'L2' are valid, recently used candidates. Further clarification on license type required.\"\n\n### TASK:\nAnalyze the following Invoice JSON and provide the JSON output:\n{invoice_json}"
+}
