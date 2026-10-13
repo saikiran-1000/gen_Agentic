@@ -1,0 +1,201 @@
+Azure - Gen AI – Configuration Guide  
+
+This document will outline the configuration steps for Azure GenAI, also known as OpenAI. 
+
+Step 1 – Obtain access for all DDE users and Azure subscriptions as per the specifications outlined in the DDE Access Document. The document link is referenced at the end of this document. 
+
+Before proceeding, please verify whether the subscription is available on the Azure account as shown in the image below. If it is not available, you will be unable to use the required Azure service. In such a case, you will need to reconnect with the cloud team for further assistance. 
+
+ 
+
+To check the subscription, open the azure portal using DDE user credentials and directly go to subscription and verify. 
+
+Step 2 – Gen AI Instance Creation 
+
+Create open ai instance and get endpoint –  
+
+ 
+
+Steps to create open ai instance –  
+
+Open azure porta -> Search Azure Open AI -> Clcik on Create like image below 
+
+ 
+
+A screenshot of a computer
+
+Description automatically generated 
+
+ 
+
+Fill all the mandatory details which is resource group which will assign you with subscription, and pricing tier(S0 in our case) and click on next. 
+
+A screenshot of a computer
+
+Description automatically generated   
+
+Now again leave it default and click on next on network section. 
+
+ 
+
+Now give a tag like user email(mandatory for good practice) and click on next. 
+
+A screenshot of a computer
+
+Description automatically generated 
+
+Now click on Create. 
+
+Now Go to the resource we create of open ai. 
+
+ 
+
+And Click on “Go to Azure OpenAI Studio” 
+
+A screenshot of a computer
+
+Description automatically generated 
+
+Now click on deployment and create new deployment of the chat version 
+
+ 
+
+Now we are done to use open ai endpoints as show in images. 
+
+A screenshot of a computer
+
+Description automatically generated 
+
+ 
+
+For more detailed instructions on creating this instance and what parameters are needed for requests and responses, check out the reference provided at the end of this document, which is from Azure officials. 
+
+ 
+
+ (Subjective)Install the necessary software and extensions as indicated below, based on your operating system. 
+
+Python 3.11(or any other versions as per the need) – And must install below libraries to use gen ai – 
+
+openai==0.28.1 
+
+azure.function  
+
+VS Code IDE – In this also below extensions need to be installed. 
+
+Azure by Microsoft 
+
+Docker (As per the need) 
+
+Azure core tool v4 
+
+Docker Desktop  
+
+User's imageOnce you've installed the software mentioned above, you'll need to log in to the Azure portal from VS Code. It's easy: in VS Code, look for the Azure icon on the left sidebar. Click it, and you'll see a sign-in option. Refer to the picture below for help. 
+
+Top of Form 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+After logging in successfully, you'll have the Azure services enabled for use, as shown below: 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+Step 3 – Now that the VS Code IDE or direct use the endpoint url to Salescforce etc is configured to work with Azure, the following steps need to be taken to utilize Gen AI. 
+
+Use the Created Gen AI instance. 
+
+Python code  
+
+Azure function app and Azure functions 
+
+Request and Response 
+
+Let’s begin the Step-4 one by one: 
+
+Use the Created GenAI instance – To use Gen AI instance, After setting this up(which is already mentioned in step 2) With this instance, we can make requests by prompt/messages and other request parameters and get predefined responses. For more detailed instructions on creating this instance and what parameters are needed for requests and responses, check out the reference provided at the end of this document, which is from Azure officials.  
+
+ 
+
+ 
+
+ 
+
+Python code – Definitely we can have other languages apart from the python, here we are using python code to implement or to call or use azure side gen ai instance. Each model or instance of OpenAI will possess its unique code or parameters.  
+
+We need majorly openai, azure.function libraries to get the gen ai response, requested by azure functions. The sample code is given on reference link: 
+
+ 
+
+Azure Function app and azure function:  After Creating open ai instance how to call and open ai instance what all are the request parameter every logic return in the azure function. Azure function app is the application which contains all the azure functions inside it, and these azure functions are called by API | URL as per the azure function configuration has made. How to create the simple azure function is given in given in reference link and how it looks like in portal please look out the below image . 
+
+ 
+
+After creation of simple azure function then we can simply include those chunk line of code on with azure function python code for open ai instance over it and then we are ready to use open ai using azure function. 
+
+ 
+
+Request and Response: Using the Endpoint URL of azure function access the function app and as per the request the response will arrive. The endpoint depends on the azure function app and azure function name and its configuration. 
+
+ 
+
+Sample Request API URL that how it looks like- https://test-ahd-gen-ai-app.azurewebsites.net/api/test-function 
+
+And response depends on how response structure is defined in code. 
+
+ 
+
+References 
+
+ 
+
+DDE Access Document - DDE Access Approval.docx 
+
+Software download links:  
+
+Python - https://www.python.org/downloads/release/python-3116/ 
+
+VS Code IDE - https://code.visualstudio.com/download 
+
+Azure core tool - https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local?tabs=windows%2Cisolated-process%2Cnode-v4%2Cpython-v2%2Chttp-trigger%2Ccontainer-apps&pivots=programming-language-python 
+
+Docker Desktop - https://www.docker.com/products/docker-desktop/ 
+
+Learning – 
+
+Python - https://docs.python.org/3/library/index.html 
+
+Azure configuration sample program using python - https://www.youtube.com/watch?v=YQtVJ7qVXDs 
+
+Azure Sign in and use azure functions - https://www.youtube.com/watch?v=YQtVJ7qVXDs 
+
+Code for request Gen AI instance on azure - How to work with the GPT-35-Turbo and GPT-4 models - Azure OpenAI Service | Microsoft Learn 
+
+Create Gen AI instance on azure - https://www.youtube.com/watch?v=jQyYeYWD97I 
