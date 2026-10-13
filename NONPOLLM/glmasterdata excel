@@ -1,0 +1,20 @@
+GLCode	GLDescriptions	CreatedDate	GLExplanation
+2102001131	Accounts Payables - Intercompany	2025-01-10 00:00:00	Payments owed to other entities within the same corporate group.
+1489907020	Accounts Payables - Intercompany - Manua	2025-01-11 00:00:00	Manually entered payments owed to other entities within the same corporate group.
+2810270	Accrued - Misc. Discounts 1	2025-01-12 00:00:00	Discounts earned but not yet received or applied from vendors.
+514055	Accrued - Misc. Discounts 1	2025-01-13 00:00:00	Discounts earned but not yet received or applied from vendors.
+2805110	Accrued costs - General - Suppliers	2025-01-14 00:00:00	Costs incurred for general supplier services, but not yet invoiced.
+221018	Accrued costs - General - Suppliers	2025-01-15 00:00:00	Costs incurred for general supplier services, but not yet invoiced.
+2820120	Accrued Deposit - Non-Returnable	2025-01-16 00:00:00	Deposits paid for assets that will not be refunded.
+2101400035	Accrued Deposit - Other1	2025-01-17 00:00:00	Miscellaneous deposits paid that are expected to be refunded.
+502280	Accrued Fee 1 sales transactions	2025-01-18 00:00:00	Fees for sales transactions that are owed but not yet billed.
+170537	Accrued Fee 2 sales transactions	2025-01-19 00:00:00	Additional fees for sales transactions that are owed but not yet billed.
+580000	Accrued Fee 3 sales transactions	2025-01-20 00:00:00	Third type of fees for sales transactions that are owed but not yet billed.
+2820170	Accrued Fees	2025-01-21 00:00:00	Fees for services received that have not yet been invoiced.
+221017	Accrued Fees	2025-01-22 00:00:00	Fees for services received that have not yet been invoiced.
+520200	Accrued Rebate & Discounts	2025-01-23 00:00:00	Rebates and discounts earned but not yet received from vendors.
+2810130	Accrued Rebate & Discounts - Manual	2025-01-24 00:00:00	Manually recorded rebates and discounts earned but not yet received.
+5120120	Acquisitions Below 25.000 DKK	2025-01-25 00:00:00	Purchase of assets with a value under 25,000 DKK.
+580005	Acquisitions Below 25.000 DKK	2025-01-26 00:00:00	Purchase of assets with a value under 25,000 DKK.
+5120110	Acquisitions Below Tax Asset Value	2025-01-27 00:00:00	Purchase of assets below the company's capitalization threshold for tax purposes.
+292540	Acquisitions Below Tax Asset Value	2025-01-28 00:00:00	Purchase of assets below the company's capitalization threshold for tax purposes.
