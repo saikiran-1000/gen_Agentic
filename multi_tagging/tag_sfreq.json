@@ -1,0 +1,391 @@
+{
+  "PO_Line_Item__c": [
+    {
+      "Product/Service Number": "CON-SNT-1",
+      "Product/Service Desc": "SMARTNET MAINTENANCE CON-SNT-1",
+      "AP Ref No": "POL-00113316"
+    },
+    {
+      "Product/Service Number": "CON-CAMSP-ST",
+      "Product/Service Desc": "ASSET MANAGEMENT STANDARD CAM DEDICATED RESOURCE 11/28/24 TO 1/27/26",
+      "AP Ref No": "POL-00113317"
+    },
+    {
+      "Product/Service Number": "SD-SWK-ESSAC1G1",
+      "Product/Service Desc": "SWSS B NO UPG ACCESSNETWORK ESSENTIALSSWRIGHT-TO- USEPER10G",
+      "AP Ref No": "POL-00113318"
+    },
+    {
+      "Product/Service Number": "SD-SWK-ESSAC1G1",
+      "Product/Service Desc": "SWSS B NO UPG ACCESSNETWORK ESSENTIALSSWRIGHT-TO- USEPER10G",
+      "AP Ref No": "POL-00113319"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A9IMA8Z0",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 8X10GE INTERFACE MODULE,FLEX",
+      "AP Ref No": "POL-00113320"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A9IMA8Z0",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 8X10GE INTERFACE MODULE,FLEX",
+      "AP Ref No": "POL-00113321"
+    },
+    {
+      "Product/Service Number": "CON-ECMU-1SWSS",
+      "Product/Service Desc": "UPGRADES MAINTENANCE CON-ECMU-1SWSS",
+      "AP Ref No": "POL-00113322"
+    },
+    {
+      "Product/Service Number": "CON-ECMU-1SWSS",
+      "Product/Service Desc": "UPGRADES MAINTENANCE CON-ECMU-1SWSS",
+      "AP Ref No": "POL-00113323"
+    },
+    {
+      "Product/Service Number": "SD-SWK-ADNED400",
+      "Product/Service Desc": "SW SUPPORT NO UPG ADVANTAGE SOFTWARE RTU LICENSE PER 400G",
+      "AP Ref No": "POL-00113324"
+    },
+    {
+      "Product/Service Number": "SD-SWK-ADNED400",
+      "Product/Service Desc": "SW SUPPORT NO UPG ADVANTAGE SOFTWARE RTU LICENSE PER 400G",
+      "AP Ref No": "POL-00113325"
+    },
+    {
+      "Product/Service Number": "CON-SSSNT-APICCLL3",
+      "Product/Service Desc": "SOLN SUPP 8X5XNBD APIC CLUSTER - LARGE",
+      "AP Ref No": "POL-00113326"
+    },
+    {
+      "Product/Service Number": "CON-SSSNT-APICCLL3",
+      "Product/Service Desc": "SOLN SUPP 8X5XNBD APIC CLUSTER - LARGE",
+      "AP Ref No": "POL-00113327"
+    },
+    {
+      "Product/Service Number": "SP-AR1-A9K24E1G",
+      "Product/Service Desc": "SP AR HW 8X5XNBD ASR 9000 24 PORT 10GE 1GE DUAL RATE-TRL",
+      "AP Ref No": "POL-00113328"
+    },
+    {
+      "Product/Service Number": "SP-AR1-A9K24E1G",
+      "Product/Service Desc": "SP AR HW 8X5XNBD ASR 9000 24 PORT 10GE 1GE DUAL RATE-TRL",
+      "AP Ref No": "POL-00113329"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-N540XACY",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP NCS540 CC 24X1/10G,8X1/10/25G SFP+/SFP2",
+      "AP Ref No": "POL-00113330"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-N540XACY",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP NCS540 CC 24X1/10G,8X1/10/25G SFP+/SFP2",
+      "AP Ref No": "POL-00113331"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-N54ASYSC",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP NCS540 24X1/10G SFP+",
+      "AP Ref No": "POL-00113332"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-N54ASYSC",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP NCS540 24X1/10G SFP+",
+      "AP Ref No": "POL-00113333"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-ASR9901C",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR9901 B BASED ON FLEXIBLE CONSUMPTION M",
+      "AP Ref No": "POL-00113334"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-ASR9901C",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR9901 B BASED ON FLEXIBLE CONSUMPTION M",
+      "AP Ref No": "POL-00113335"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A94HEXFC",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 400GE FLEXI",
+      "AP Ref No": "POL-00113336"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A94HEXFC",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 400GE FLEXI",
+      "AP Ref No": "POL-00113337"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A9K1FCGE",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 24-PORT 10G",
+      "AP Ref No": "POL-00113338"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A9K1FCGE",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 24-PORT 10G",
+      "AP Ref No": "POL-00113339"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-D5N4028Z",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP NCS 540 28X10G + 4X100G DC",
+      "AP Ref No": "POL-00113340"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-D5N4028Z",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP NCS 540 28X10G + 4X100G DC",
+      "AP Ref No": "POL-00113341"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A9KEXFC5",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 2T FLEXIBLE",
+      "AP Ref No": "POL-00113342"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A9KEXFC5",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 2T FLEXIBLE",
+      "AP Ref No": "POL-00113343"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A9K8HEGF",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 800G FLEXIBLE CONSUMPTION COMB",
+      "AP Ref No": "POL-00113344"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A9K8HEGF",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 800G FLEXIBLE CONSUMPTION COMB",
+      "AP Ref No": "POL-00113345"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A99RPFFC",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9900 FIXED CHASSIS ROUTE PROCESSOR",
+      "AP Ref No": "POL-00113346"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-A99RPFFC",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9900 FIXED CHASSIS ROUTE PROCESSOR",
+      "AP Ref No": "POL-00113347"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-ASR9902M",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9902, 2RU, FLEXIBLE CONSUMPTION CHA",
+      "AP Ref No": "POL-00113348"
+    },
+    {
+      "Product/Service Number": "SD-AR1K-ASR9902M",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9902, 2RU, FLEXIBLE CONSUMPTION CHA",
+      "AP Ref No": "POL-00113349"
+    },
+    {
+      "Product/Service Number": "CON-BCSOS-SCRUM",
+      "Product/Service Desc": "SCRUM SERVICES START DATE: 29- OCT-2024 END DATE: 28-DEC-2025",
+      "AP Ref No": "POL-00113350"
+    },
+    {
+      "Product/Service Number": "CON-BCSOS-SCRUM",
+      "Product/Service Desc": "SCRUM SERVICES START DATE: 29- OCT-2024 END DATE: 28-DEC-2025",
+      "AP Ref No": "POL-00113351"
+    },
+    {
+      "Product/Service Number": "CON-CAMSP-ST-A",
+      "Product/Service Desc": "ASSET MANAGEMENT STANDARD CAM DEDICATED RESOURCE 11/28/24 TO 1/27/26",
+      "AP Ref No": "POL-00113352"
+    },
+    {
+      "Product/Service Number": "CON-CAMSP-ST",
+      "Product/Service Desc": "ASSET MANAGEMENT STANDARD CAM DEDICATED RESOURCE 11/28/24 TO 1/27/26",
+      "AP Ref No": "POL-00113353"
+    },
+    {
+      "Product/Service Number": "CON-CAMSP-ST-A",
+      "Product/Service Desc": "ASSET MANAGEMENT STANDARD CAM DEDICATED RESOURCE 11/28/24 TO 1/27/26",
+      "AP Ref No": "POL-00113354"
+    },
+    {
+      "Product/Service Number": "CON-BCSO-OP",
+      "Product/Service Desc": "OUTCOMES ADVISORY SERVICES START DATE: 29-OCT-2024 END 28-DEC-2025",
+      "AP Ref No": "POL-00113355"
+    },
+    {
+      "Product/Service Number": "CON-BCSO-OP",
+      "Product/Service Desc": "OUTCOMES ADVISORY SERVICES START DATE: 29-OCT-2024 END 28-DEC-2025",
+      "AP Ref No": "POL-00113356"
+    },
+    {
+      "Product/Service Number": "CON-BCSOS-EAAS-CE",
+      "Product/Service Desc": "EXPERT-AS-A-SERVICE CONSULTING ENGINEER START DATE: 11/29/24 END 12/28/26",
+      "AP Ref No": "POL-00113357"
+    },
+    {
+      "Product/Service Number": "CON-BCSOS-EAAS-SA",
+      "Product/Service Desc": "LCS EXPERT-AS-A-SERVICE SOLUTI ON ARCHITECT START 11/29/24 END 12/28/26",
+      "AP Ref No": "POL-00113358"
+    },
+    {
+      "Product/Service Number": "CON-BCSOS-EAAS-CE",
+      "Product/Service Desc": "EXPERT-AS-A-SERVICE CONSULTING ENGINEER START DATE: 11/29/24 END 12/28/26",
+      "AP Ref No": "POL-00113359"
+    },
+    {
+      "Product/Service Number": "CON-BCSOS-EAAS-SA",
+      "Product/Service Desc": "LCS EXPERT-AS-A-SERVICE SOLUTI ON ARCHITECT START 11/29/24 END 12/28/26",
+      "AP Ref No": "POL-00113360"
+    },
+    {
+      "Product/Service Number": "CON-CXEC-XA-EC",
+      "Product/Service Desc": "EXPERT CARE START DATE11/28/24 END DATE: 27-JAN-2026 CON-CXEC-XA-EC",
+      "AP Ref No": "POL-00113361"
+    },
+    {
+      "Product/Service Number": "CON-CXEC-XA-EC",
+      "Product/Service Desc": "EXPERT CARE START DATE11/28/24 END DATE: 27-JAN-2026 CON-CXEC-XA-EC",
+      "AP Ref No": "POL-00113362"
+    },
+    {
+      "Product/Service Number": "CON-SNT-1",
+      "Product/Service Desc": "SMARTNET MAINTENANCE CON-SNT-1",
+      "AP Ref No": "POL-00113363"
+    },
+    {
+      "Product/Service Number": "CON-SNT-1-A",
+      "Product/Service Desc": "SMARTNET MAINTENANCE CON-SNT-1",
+      "AP Ref No": "POL-00113364"
+    }
+  ],
+  "Invoice_Line_Item__c": [
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "SMARTNET MAINTENANCE CON-SNT-1",
+      "Invoice Line Item Name": "INVL-04600241"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "ASSET MANAGEMENT STANDARD CAM DEDICATED RESOURCE 11/28/24 TO 1/27/26",
+      "Invoice Line Item Name": "INVL-04600242"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "SWSS B NO UPG ACCESSNETWORK ESSENTIALSSWRIGHT-TO- USEPER10G",
+      "Invoice Line Item Name": "INVL-04600243"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "SWSS B NO UPG ACCESSNETWORK ESSENTIALSSWRIGHT-TO- USEPER10G",
+      "Invoice Line Item Name": "INVL-04600244"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 8X10GE INTERFACE MODULE,FLEX",
+      "Invoice Line Item Name": "INVL-04600245"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP ASR 9000 8X10GE INTERFACE MODULE,FLEX",
+      "Invoice Line Item Name": "INVL-04600246"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "UPGRADES MAINTENANCE CON-ECMU-1SWSS",
+      "Invoice Line Item Name": "INVL-04600247"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "UPGRADES MAINTENANCE CON-ECMU-1SWSS",
+      "Invoice Line Item Name": "INVL-04600248"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "SW SUPPORT NO UPG ADVANTAGE SOFTWARE RTU LICENSE PER 400G",
+      "Invoice Line Item Name": "INVL-04600249"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "SW SUPPORT NO UPG ADVANTAGE SOFTWARE RTU LICENSE PER 400G",
+      "Invoice Line Item Name": "INVL-04600250"
+    },
+    {
+      "Product/Service No.": "CON-SNT-1",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600251"
+    },
+    {
+      "Product/Service No.": "CON-CAMSP-ST",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600252"
+    },
+    {
+      "Product/Service No.": "SD-SWK-ESSAC1G1",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600253"
+    },
+    {
+      "Product/Service No.": "SD-SWK-ESSAC1G1",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600254"
+    },
+    {
+      "Product/Service No.": "SD-AR1K-A9IMA8Z0",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600255"
+    },
+    {
+      "Product/Service No.": "SD-AR1K-A9IMA8Z0",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600256"
+    },
+    {
+      "Product/Service No.": "CON-ECMU-1SWSS",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600257"
+    },
+    {
+      "Product/Service No.": "CON-ECMU-1SWSS",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600258"
+    },
+    {
+      "Product/Service No.": "SD-SWK-ADNED400",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600259"
+    },
+    {
+      "Product/Service No.": "SD-SWK-ADNED400",
+      "Product/Service Desc": "null",
+      "Invoice Line Item Name": "INVL-04600260"
+    },
+    {
+      "Product/Service No.": "SD-AR1K-N540XACY",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP NCS540 CC 24X1/10G,8X1/10/25G SFP+/SFP2",
+      "Invoice Line Item Name": "INVL-04600261"
+    },
+    {
+      "Product/Service No.": "SD-AR1K-N540XACY",
+      "Product/Service Desc": "AR LEVEL 1 NO SW SUP NCS540 CC 24X1/10G,8X1/10/25G SFP+/SFP2",
+      "Invoice Line Item Name": "INVL-04600262"
+    },
+    {
+      "Product/Service No.": "CON-BCSO-OP",
+      "Product/Service Desc": "OUTCOMES ADVISORY SERVICES",
+      "Invoice Line Item Name": "INVL-04600263"
+    },
+    {
+      "Product/Service No.": "CON-BCSO-OP",
+      "Product/Service Desc": "OUTCOMES ADVISORY SERVICES START DATE: 29-OCT",
+      "Invoice Line Item Name": "INVL-04600264"
+    },
+    {
+      "Product/Service No.": "CON-BCSOS-EAAS-CE",
+      "Product/Service Desc": "EXPERT-AS-A-SERVICE CONSULTING ENGINEER START DATE: 11/29/24 END 12/28/26",
+      "Invoice Line Item Name": "INVL-04600265"
+    },
+    {
+      "Product/Service No.": "CON-BCSOS-EAAS-SA",
+      "Product/Service Desc": "LCS EXPERT",
+      "Invoice Line Item Name": "INVL-04600266"
+    },
+    {
+      "Product/Service No.": "CON-BCSOS-EAAS-CE",
+      "Product/Service Desc": "11/29/24 END 12/28/26",
+      "Invoice Line Item Name": "INVL-04600267"
+    },
+    {
+      "Product/Service No.": "null",
+      "Product/Service Desc": "11/29/24 END 12/28/26",
+      "Invoice Line Item Name": "INVL-04600268"
+    }
+  ]
+}
