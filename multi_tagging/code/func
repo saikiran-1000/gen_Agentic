@@ -1,0 +1,152 @@
+import azure.functions as func
+import logging
+import json
+import os
+from agents.supervisor_agent import SupervisorAgent
+from azure.storage.blob import BlobServiceClient
+
+
+####
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+logger = logging.getLogger(__name__)
+
+blob_connection_string = os.getenv('AzureWebJobsStorage')
+def get_blob_service_client(blob_connection_string):
+    # Initialize BlobServiceClient
+    blob_client = BlobServiceClient.from_connection_string(blob_connection_string)
+    logger.info(f"blob_service_client, {blob_client}")
+    return blob_client
+
+blob_service_client = get_blob_service_client(blob_connection_string)
+
+def fetch_config(container_name, blob_name):
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(blob_name)
+
+        # Download blob content
+        download_stream = blob_client.download_blob()
+        config_data = download_stream.readall()
+
+        # Parse JSON string to dict
+        config_dict = json.loads(config_data)
+        logger.info(f"Fetched {blob_name} from {container_name}")
+        return config_dict
+    except Exception as e:
+        logger.error(f"Error fetching config: {e}")
+        return None
+
+
+@app.route(route="multiagent_tagging")
+async def multiagent_tagging(req: func.HttpRequest) -> func.HttpResponse:
+    logger.info("Started MultiAgent Tagging")
+
+    if req.method != "POST":
+        return func.HttpResponse("Only POST method is supported.", status_code=405)
+
+    # Parse JSON
+    try:
+        test_data = req.get_json()
+
+        # test_data=req
+        logger.info(f"Data received for inferencing: {test_data}")
+
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "Invalid JSON format", "status_code": 400}),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not test_data:
+        return func.HttpResponse(
+            json.dumps({"error": "No data found for inferencing", "status_code": 400}),
+            status_code=400,
+            mimetype="application/json"
+        )
+    try:
+        container = "multiagenttagging"
+        blob = "config.json"
+        prompts = "prompts.json"
+        # Fetch / Download
+        config = fetch_config(container, blob)
+        prompts = fetch_config(container, prompts)
+        logger.info(f"CONFIGS: {config}")
+        logger.info(f"PROMPTS: {prompts}")
+
+    except Exception as e:
+        logger.exception("Error in loading config and prompts from storage account")
+        return func.HttpResponse(
+            json.dumps({"error": f"Loading failed: {str(e)}", "status_code": 500}),
+            status_code=500,
+            mimetype="application/json"
+        )
+    for field in config.get("INVOICE_LINE_CROSSCHECK"):
+        if field not in config.get("INV_NON_DESC_FIELDS"):
+            return func.HttpResponse(
+                json.dumps({"error": "Fields in INVOICE_LINE_CROSSCHECK is not present in INV_NON_DESC_FIELDS.", "status_code": 400}),
+                status_code=400,
+                mimetype="application/json"
+            )  
+
+    try:
+        # {invoice_lines:"Invoice_line_Item__c, po_lines:...}
+
+        invoice_lines = test_data.get("Invoice_Line_Item__c")
+        po_lines = test_data.get("PO_Line_Item__c")
+
+        if invoice_lines is None or po_lines is None:
+            return func.HttpResponse(
+                json.dumps({"error": "Missing invoice_lines or po_lines", "status_code": 400}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        if not isinstance(invoice_lines, list) or not isinstance(po_lines, list):
+            return func.HttpResponse(
+                json.dumps({"error": "invoice_lines and po_lines must be lists", "status_code": 400}),
+                status_code=400,
+                mimetype="application/json"
+            )
+        INVALID_VALUES = ["null", "n/a", ""]
+
+        for d in invoice_lines:
+            keys_to_remove = [
+                k for k, v in d.items()
+                if str(v).strip().lower() in INVALID_VALUES
+            ]
+            for k in keys_to_remove:
+                del d[k]
+
+        for d in po_lines:
+            keys_to_remove = [
+                k for k, v in d.items()
+                if str(v).strip().lower() in INVALID_VALUES
+            ]
+            for k in keys_to_remove:
+                del d[k]
+    except Exception as e:
+        logger.exception("Error while reading invoice_lines or po_lines")
+        return func.HttpResponse(
+            json.dumps({"error": f"Failed to read invoice_lines/po_lines: {str(e)}", "status_code": 500}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    # Run supervisor orchestration with exception handling
+    try:
+        supervisor = SupervisorAgent(config=config, prompts=prompts)
+        result = await supervisor.orchestrate_matching(invoice_lines, po_lines)
+    except Exception as e:
+        logger.exception("Supervisor orchestration failed")
+        return func.HttpResponse(
+            json.dumps({"error": f"Inference failed: {str(e)}", "status_code": 500}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    return func.HttpResponse(
+        json.dumps(result),
+        status_code=200,
+        mimetype="application/json"
+    )
