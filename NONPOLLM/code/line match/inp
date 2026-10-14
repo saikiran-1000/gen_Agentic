@@ -1,0 +1,158 @@
+"""
+Input validation module for Non-PO Invoice Coding for Line Description Matching.
+This module provides comprehensive input validation for Non-PO invoice coding using Pydantic models.
+It ensures data integrity and schema compliance for invoice-related operations.
+"""
+import logging
+from typing import Dict, List, Any
+from pydantic import BaseModel, Field, ValidationError
+
+logger = logging.getLogger(__name__)
+
+def pydantic_classes(config: Dict[str, Any]) -> Any:
+    """
+    Dynamically generates Pydantic classes for validating invoice data based on the provided
+    configuration, including support for nested historical match structures.
+    Args:
+        config (Dict[str, Any]): Configuration dictionary containing key mappings.
+    Returns:
+        InvoiceData (BaseModel): Pydantic model for invoice data validation.
+    """
+    class LineDescription(BaseModel):
+        """
+        Represents a matched line description from historical data.
+        Attributes:
+            matchedLineDescription (str): Description of the matched historical line item.
+            score (float): Confidence score for the match (between 0 and 1).
+        """
+        matchedLineDescription: str = Field(
+            ...,
+            description="Matched historical line description"
+        )
+        score: float = Field(
+            ...,
+            ge=0,
+            le=1,
+            description="Match confidence score between 0 and 1"
+        )
+
+    class HistoricalMatch(BaseModel):
+        """
+        Represents a historical match for a line item, including GL category and matched
+        descriptions.
+        Attributes:
+            glCategory (str): GL category from historical data.
+            glCategoryExplanation (str): Explanation of the GL category.
+            lineDescriptions (List[LineDescription]): List of matched historical line descriptions.
+        """
+        glCategory: str = Field(
+            ...,
+            description="GL category from historical match"
+        )
+        glCategoryExplanation: str = Field(
+            ...,
+            description="Explanation of the historical GL category"
+        )
+        lineDescriptions: List[LineDescription] = Field(
+            ...,
+            description="List of matched historical line descriptions",
+            min_items=1
+        )
+
+    class InvoiceLineItems(BaseModel):
+        """
+        Represents a single invoice line item with identifier, description, and historical matches.
+        Attributes:
+            invoiceLineID (str): Unique identifier for the invoice line item.
+            lineDescription (str): Descriptive name of the line item.
+            historicallyMatchedLineDescriptions (List[HistoricalMatch]): List of historical matches.
+        """
+        invoiceLineID: str = Field(
+            ...,
+            description="Unique identifier for the invoice line item",
+            # alias=config.get("LLM_to_salesforce_key_mapping", {}).get("invoiceLineID")
+            alias="invoiceLineID"
+        )
+        lineDescription: str = Field(
+            ...,
+            description="Descriptive name of the line item",
+            # alias=config.get("LLM_to_salesforce_key_mapping", {}).get("lineDescription")
+            alias="lineDescription"
+        )
+        historicallyMatchedLineDescriptions: List[HistoricalMatch] = Field(
+            ...,
+            description="List of historically matched GL categories and line descriptions"
+        )
+
+    class InvoiceData(BaseModel):
+        """
+        Represents the full invoice data including master GL categories and line items.
+        Attributes:
+            invoiceID (str): Unique identifier for the invoice.
+            invoiceDate (str): Date of the invoice (YYYY-MM-DD).
+            approverName (str): Name of the approver.
+            vendorID (str): Unique identifier for the vendor.
+            invoiceLineItems (List[InvoiceLineItems]): List of invoice line items.
+        """
+        invoiceID: str = Field(
+            ...,
+            description="Unique identifier for the invoice",
+            # alias=config.get("LLM_to_salesforce_key_mapping", {}).get("invoiceID")
+            alias="invoiceID"
+        )
+        invoiceDate: str = Field(
+            ...,
+            description="Date of the invoice (YYYY-MM-DD)",
+            # alias=config.get("LLM_to_salesforce_key_mapping", {}).get("invoiceDate")
+            alias="invoiceDate"
+        )
+        approverName: str = Field(
+            ...,
+            description="Name of the approver of the invoice",
+            # alias=config.get("LLM_to_salesforce_key_mapping", {}).get("approverName")
+            alias="approverName"
+        )
+        vendorID: str = Field(
+            ...,
+            description="Unique identifier for the vendor",
+            # alias=config.get("LLM_to_salesforce_key_mapping", {}).get("vendorID")
+            alias="vendorID"
+        )
+        invoiceLineItems: List[InvoiceLineItems] = Field(
+            ...,
+            min_items=1,
+            description="List of line items in the invoice",
+            # alias=config.get("LLM_to_salesforce_key_mapping", {}).get("invoiceLineItems")
+            alias="invoiceLineItems"
+        )
+
+    return InvoiceData
+
+def input_validation(
+    invoice_non_po_details: Dict[str, Any],
+    config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Validates the input invoice data for Non-PO Coding using dynamic Pydantic models.
+    Args:
+        invoice_non_po_details (Dict[str, Any]): Input invoice data to validate.
+        config (Dict[str, Any]): Configuration for key mappings.
+    Returns:
+        Dict[str, Any]: Validated invoice data as a dictionary.
+    Raises:
+        ValueError: If input data fails schema validation.
+    """
+    logger.info("Starting input validation for Non-PO invoice data for Line Description Matching.")
+    try:
+        InvoiceData = pydantic_classes(config)
+        validated_model = InvoiceData(**invoice_non_po_details)
+        logger.info("Input validation successful for Line Description Matching.")
+        return validated_model.model_dump(by_alias=False)
+    except ValidationError as validation_error:
+        error_message = (
+            "##NON-PO-CODING-LINE-DESCRIPTION-MATCHING-ERROR## Input JSON Schema Validation Error: "
+            f"{validation_error}"
+        )
+        logger.error(error_message)
+        raise ValueError(error_message) from validation_error
+    
