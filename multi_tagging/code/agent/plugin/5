@@ -1,0 +1,138 @@
+from semantic_kernel.functions import kernel_function
+
+import os
+import requests
+# from dotenv import load_dotenv
+import logging
+
+logger = logging.getLogger(__name__)
+
+# load_dotenv()
+
+
+class SalesforceStatusPlugin:
+
+    def __init__(self):
+        # Load all dummy / real credentials from env or hardcode here
+        self.grant_type = os.getenv("SF_GRANT_TYPE")
+        self.client_id = os.getenv("SF_CLIENT_ID")
+        self.client_secret = os.getenv("SF_CLIENT_SECRET")
+        self.username = os.getenv("SF_USERNAME")
+        self.password = os.getenv("SF_PASSWORD")
+
+        # Salesforce URLs
+        self.login_url = os.getenv("SF_LOGIN_URL")
+        self.endpoint_url = os.getenv("SF_ENDPOINT_URL")
+        
+        # Initialize internal variable to store token
+        self._access_token = None
+
+    # --------------------------------------------------------------------------------------
+
+    @kernel_function(
+        name="call_salesforce_validation_api",
+        description="Authenticate with Salesforce and call the Apex REST API for validation with a JSON payload."
+    )
+    def call_salesforce_validation_api(self, input_json: dict) -> dict:
+        """
+        SK-usable function that accepts dict → returns dict.
+
+        Parameters
+        ----------
+        input_json : dict
+            The JSON payload to be sent to the Apex REST endpoint.
+
+        Returns
+        -------
+        dict
+            The Salesforce API response in dict format.
+        """
+
+        # ---------------- STEP 1 → Authenticate with Salesforce ---------------- #
+        
+        # Only authenticate if we don't have a token yet
+        if not self._access_token:
+            logger.info("[SalesforcePlugin] No cached token found. Authenticating with Salesforce...")
+            
+            auth_payload = {
+                "grant_type": self.grant_type,
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "username": self.username,
+                "password": self.password
+            }
+
+            try:
+                auth_response = requests.post(self.login_url, data=auth_payload)
+                # logger.info(f"@#@#Auth Payload: {auth_payload}")
+                
+                if auth_response.status_code != 200:
+                    logger.error(f"[SalesforcePlugin] Authentication failed: {auth_response.text}")
+                    return {
+                        "error": "Authentication failed",
+                        "details": auth_response.text
+                    }
+
+                auth_data = auth_response.json()
+                new_token = auth_data.get("access_token")
+
+                if not new_token:
+                    logger.error("[SalesforcePlugin] No access token in response.")
+                    return {"error": "No access token received"}
+
+                # Store the token globally in the instance
+                self._access_token = new_token
+                logger.info(f"[SalesforcePlugin] Authentication successful and token cached.")
+
+            except Exception as e:
+                logger.exception("[SalesforcePlugin] Exception during authentication.")
+                return {"error": str(e)}
+        else:
+            logger.info(f"[SalesforcePlugin] Using cached Salesforce access token.")
+
+        # ---------------- STEP 2 → Call Apex REST API ---------------- #
+        
+        # Use the stored self._access_token
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json"
+        }
+
+        try:
+            salesforce_response = requests.post(
+                self.endpoint_url,
+                headers=headers,
+                json=input_json  # direct dict payload
+            )
+            logger.info(f"For Validation: {input_json}")
+            
+            # OPTIONAL SAFETY: If token expired (401), clear it so next run regenerates it
+            if salesforce_response.status_code == 401:
+                logger.warning("[SalesforcePlugin] Token appears expired (401). Clearing cache.")
+                self._access_token = None
+                return {
+                     "error": "API call failed (Unauthorized). Token cleared, please retry.",
+                     "status_code": 401
+                }
+
+            if salesforce_response.status_code not in [200, 201]:
+                logger.error(f"[SalesforcePlugin] API call failed: {salesforce_response.text}")
+                return {
+                    "error": "API call failed",
+                    "status_code": salesforce_response.status_code,
+                    "details": salesforce_response.text
+                }
+
+            # logger.info(f"[SalesforcePlugin] Successful response received: {salesforce_response.json()}")
+
+            # Return JSON as dict
+            logger.info(f"SALESFORCE RAW RESPONSE: {salesforce_response.json()}")
+            return salesforce_response.json()
+
+        except Exception as e:
+            logger.exception("[SalesforcePlugin] Exception during Apex REST call.")
+            return {"error": str(e)}
+
+
+
+
