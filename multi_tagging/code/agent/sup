@@ -1,0 +1,318 @@
+import os
+import time
+from asyncio.log import logger
+from semantic_kernel import Kernel
+from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+from agents.orchestrator_agent import OrchestratorAgent
+import pandas as pd
+from semantic_kernel.functions import KernelArguments
+from agents.RAG_Agent import RAGAgent
+import json
+
+# from dotenv import load_dotenv
+
+# load_dotenv()
+
+class SupervisorAgent:
+    """Supervisor Agent orchestrates invoice-PO matching using plugin-based agents."""
+
+    def __init__(self, config, prompts):
+        self.config = config
+        self.kernel = Kernel()
+        self.prompts = prompts
+        self._initialize_kernel()
+        self._load_plugins()
+        # self._setup_agents()
+        self.orchestrator = OrchestratorAgent(self.kernel, config=config, system_prompt=self.prompts["ORCHESTRATOR_AGENT_SYSTEM_PROMPT"])
+        self.rag_agent = RAGAgent(self.kernel, config=config)
+
+        self.rules_enabled = config.get("RULES", "yes").lower()
+
+    def _initialize_kernel(self):
+        """Initialize Semantic Kernel with Azure OpenAI."""
+        service_id = os.getenv("SK_SERVICE_ID")
+        deployment_name = os.getenv("AZURE_DEPLOYMENT_NAME")
+        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+
+        service = AzureChatCompletion(
+            service_id=service_id,
+            deployment_name=deployment_name,
+            endpoint=endpoint,
+            api_key=api_key,
+            api_version=api_version
+        )
+
+        self.kernel.add_service(service)
+
+    
+    def _load_plugins(self):
+        """Load all plugins used by agents."""
+        from agents.plugins.io_handler_plugin import InputDataHandlerPlugin
+        from agents.plugins.rule_based_plugin import RuleBasedPlugin
+        from agents.plugins.embedding_plugin import EmbeddingPlugin
+        from agents.plugins.retrieval_plugin import RetrievalPlugin
+        from agents.plugins.salesforce_plugin import SalesforceStatusPlugin
+        from agents.llm_reasoning_agent import LLMReasoningAgent
+
+        # tagging_config = self.config.get("TAGGING_CONFIG", {})
+        self.kernel.add_plugin(InputDataHandlerPlugin(self.config), plugin_name="InputDataHandlerPlugin")
+        self.kernel.add_plugin(RuleBasedPlugin(self.config), plugin_name="RuleBasedPlugin")
+        self.kernel.add_plugin(EmbeddingPlugin(), plugin_name="EmbeddingPlugin")
+        self.kernel.add_plugin(LLMReasoningAgent(), plugin_name="LLMReasoningAgent")
+
+        self.kernel.add_plugin(RetrievalPlugin(), plugin_name="RetrievalPlugin")
+        self.kernel.add_plugin(SalesforceStatusPlugin(), plugin_name="SalesforceStatusPlugin")
+
+    async def orchestrate_matching(self, invoice_lines, po_lines):
+        """Run orchestration flow based on orchestrator output."""
+        
+        # context = {"request":request, "Rules": config.get("Rules")}
+        context = {"invoice_lines": invoice_lines, "po_lines": po_lines, "Rules": self.rules_enabled}
+        wrtime=time.time()
+        # Step 1: Ask orchestrator which plugins to run
+        workflow_response = await self.orchestrator.get_workflow(context)
+        logger.info(f"Orchestrator decided workflow: {workflow_response}")
+        logger.info(f"TIME FOR WORKFLOW: {time.time()-wrtime}")
+        # Step 2: Run plugins in sequence
+        results = []
+        all_rag_results = []
+        curr_invl = []
+        curr_pol = []
+        #  ["InputDataHandlerPlugin", "RuleBasedPlugin", "RAGAgent"]
+        for plugin_name in workflow_response:
+            logger.info(f"Plugin: {plugin_name}")
+            if plugin_name == "InputDataHandlerPlugin":
+                try:
+                    plugin_function = self.kernel.plugins[plugin_name]["validate_input_data"]
+                    # Create kernel arguments with the context data
+
+                    args = KernelArguments(
+                        invoice_lines=invoice_lines,
+                        po_lines=po_lines
+                    )
+                    result = await plugin_function.invoke(self.kernel, args)
+                    self.inv_df = result.value.get('invoice_df',[])
+                    self.po_df = result.value.get('po_df',[])
+                    # self.prompt = result.value.get('prompt')
+                    # self.temperature = result.value.get('temperature')
+                    self.rag_agent.invoice_df = self.inv_df
+                    self.rag_agent.po_df = self.po_df
+                except Exception as e:
+                    logger.info(f"Error executing plugin {plugin_name}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            elif plugin_name == "RuleBasedPlugin":
+                try:
+                    # Get the plugin function
+                    plugin_function = self.kernel.plugins[plugin_name]["match_invoices_to_pos"]
+                    
+                    args = KernelArguments(
+                        inv_df=self.inv_df,
+                        po_df=self.po_df
+                    )
+                    
+                    result1 = await plugin_function.invoke(self.kernel, args)
+                    self.inv_df = result1.value.get("remaining_invoice_data")
+                    rule_check_inv = result1.value.get("rule_check_invoice")
+                    self.po_df = result1.value.get("remaining_po_data")
+                    rule_check_po = result1.value.get("rule_check_po")
+                    rule_check_reason = result1.value.get("rule_check_reason")
+                    
+                    rule_result_list = []
+                    for i in range(len(rule_check_inv)):
+                        rule_result_list.append({
+                                    'InvoiceLineItemNumber': rule_check_inv[i],
+                                    'PurchaseOrderNumber': rule_check_po[i],
+                                    'MatchPercentage': 100,
+                                    'MatchingReason': rule_check_reason[i]
+                                })
+                    results.extend(rule_result_list)
+                    logger.info(f"@#RULE RESULT {results}")
+                except Exception as e:
+                    logger.warning(f"Error executing plugin {plugin_name}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            elif plugin_name == "RAGAgent":
+                try:
+                    logger.info("Running RAG Agent flow...")
+                    
+                    if isinstance(self.inv_df, list) and len(self.inv_df) == 0:
+                        return results
+                    if isinstance(self.po_df, list) and len(self.po_df) == 0:
+                        return results
+                    
+                    # Get number of retries from config
+                    number_of_retries = 0
+                    number_retries = self.config.get("retry", "no")
+
+                    if str(number_retries).lower() == "yes":
+                        number_of_retries = 1
+
+                    logger.info(f"RAG Agent will run with {number_of_retries} retry attempt(s)")
+                    
+                    current_invoice_lines = self.inv_df.copy() if isinstance(self.inv_df, list) else self.inv_df
+                    current_po_lines = self.po_df.copy() if isinstance(self.po_df, list) else self.po_df
+                    po_vdb = None
+                    logger.info(f"RAG INPUT current_invoice_lines: {len(current_invoice_lines)} -- {current_invoice_lines}")
+                    logger.info(f"RAG INPUT current_po_lines: {len(current_po_lines)}")
+                    # Store initial total invoice count
+                    initial_invoice_count = len(current_invoice_lines)
+                    logger.info(f"Initial invoice line count: {initial_invoice_count}")
+                    logger.info(f"Initial PO line count: {len(current_po_lines)}")
+                    start_time_total = time.time()
+                    delete_list=[]
+                    # Initial run + retries
+                    for attempt in range(number_of_retries + 1):
+                        if attempt == 0:
+                            logger.info("Running RAG for first time")
+                        else:
+                            temp_list=[invl.get(self.rag_agent.invoice_line_identifier_field) for invl in current_invoice_lines]
+                            all_rag_results = [
+                                item for item in all_rag_results
+                                if item.get("InvoiceLineItemNumber") not in temp_list
+                            ]
+                            del temp_list
+                            logger.info(f"Length of data solved in first try: {len(all_rag_results)}")
+                            logger.info(f"Running RAG for Second time")
+                        
+                        if not current_invoice_lines:
+                            logger.info("No more invoice lines to process. Stopping.")
+                            break
+                        
+                        start_time_attempt = time.time()
+                        
+                        # Run RAG Agent
+                        rag_results, po_vdb, all_removed_line = await self.rag_agent.run_rag(
+                            po_lines=current_po_lines,
+                            invoice_lines=current_invoice_lines,
+                            delete_list=delete_list,
+                            prompt1=self.prompts["MATCHING_PROMPT"],
+                            user_prompt=self.prompts["USER_PROMPT_TEMPLATE"],
+                            reuse_vector_store=(attempt > 0),
+                            existing_po_vdb=po_vdb
+                        )
+                        
+                        end_time_attempt = time.time()
+                        attempt_time = end_time_attempt - start_time_attempt
+                        
+                        logger.info(f"Attempt {attempt} completed in {attempt_time:.2f}s")
+                        logger.info(f"DELETE LIST after RAG: {len(delete_list)} -- {delete_list}")
+                        logger.info(f"Results from this attempt: {len(rag_results)}")
+                        
+                        # Collect results
+                        all_rag_results.extend(rag_results)
+                        all_rag_results = [
+                            item for item in all_rag_results
+                            if item.get("InvoiceLineItemNumber") not in all_removed_line
+                        ]
+
+                        # ================================================================
+                        # HANDLE DETAGGED INVOICES (all_removed_line) IN SAME ATTEMPT
+                        # ================================================================
+                        if all_removed_line and len(all_removed_line) > 0:
+                            logger.info(f"Processing {len(all_removed_line)} detagged invoices in same attempt")
+                            logger.info(f"Detagged invoice IDs: {all_removed_line}")
+                            
+                            
+                            if all_removed_line:
+                                logger.info(f"Found {len(all_removed_line)} detagged invoice lines to reprocess")
+                                
+                                # Get all tagged PO IDs from current results
+                                tagged_po_ids = set()
+                                for result in all_rag_results:
+                                    po_num = result.get("PurchaseOrderNumber")
+                                    if po_num and po_num != "null":
+                                        tagged_po_ids.add(po_num)
+                                
+                                # Get remaining untagged PO lines
+                                remaining_po_lines = [
+                                    po for po in self.po_df
+                                    if po.get(self.rag_agent.po_line_identifier_field) not in tagged_po_ids
+                                ]
+                                remaining_inv_lines=[
+                                    inv for inv in self.inv_df
+                                    if inv.get(self.rag_agent.invoice_line_identifier_field) in all_removed_line
+                                ]
+                                logger.info(f"Remaining untagged PO lines: {len(remaining_po_lines)}")
+                                
+                                if remaining_po_lines:
+                                    # Reprocess detagged invoices with remaining PO lines
+                                    start_time_detag = time.time()
+                                    logger.info(f"Input for duplicate RAG callout: {remaining_inv_lines}")
+
+                                    detag_results, po_vdb, _ = await self.rag_agent.run_rag(
+                                        po_lines=remaining_po_lines,
+                                        invoice_lines=remaining_inv_lines,
+                                        delete_list=delete_list,
+                                        prompt1=self.prompts["MATCHING_PROMPT"],
+                                        user_prompt=self.prompts["USER_PROMPT_TEMPLATE"],
+                                        reuse_vector_store=True,  # Reuse vector store
+                                        existing_po_vdb=po_vdb
+                                    )
+                                    
+                                    end_time_detag = time.time()
+                                    detag_time = end_time_detag - start_time_detag
+                                    
+                                    logger.info(f"Detagged processing completed in {detag_time:.2f}s --{len(delete_list)} -- {delete_list}")
+                                    logger.info(f"Detagged results: {len(detag_results)}")
+                                    all_rag_results.extend(detag_results)
+                                    logger.info(f"Total results after detagged processing: {len(all_rag_results)}")
+                                else:
+                                    logger.warning("No remaining PO lines available for detagged invoices")
+                            else:
+                                logger.warning("Detagged invoice lines not found in original data")
+                        
+                        # ================================================================
+                        # PREPARE FOR NEXT RETRY (if needed)
+                        # ================================================================
+                        
+                        # Filter for next retry: only untagged invoices (PO = "null")
+                        untagged_results = [r for r in all_rag_results if r.get("PurchaseOrderNumber") == "null"]
+                        
+                        untagged_count = len(untagged_results)
+                        untagged_percentage = (untagged_count / initial_invoice_count) * 100 if initial_invoice_count > 0 else 0
+                        
+                        logger.info(f"Untagged invoice lines: {untagged_count}/{initial_invoice_count} ({untagged_percentage:.2f}%)")
+                        
+                        # Check if untagged count is less than 90% of initial count (i.e., at least 10% tagged)
+                        if untagged_count >= ((self.config.get("if_retry_is_yes_then_detag_threshold_percent",90)/100) * initial_invoice_count):
+                            logger.warning(f"Untagged count ({untagged_count}) is >= {self.config.get("if_retry_is_yes_then_detag_threshold_percent",90)}% of initial count ({initial_invoice_count}). Stopping retries.")
+                            break
+                        
+                        if not untagged_results or attempt == number_of_retries:
+                            # No more retries needed or max retries reached
+                            break
+                        
+                        # Prepare for next retry
+                        untagged_invoice_ids = [r.get("InvoiceLineItemNumber") for r in untagged_results]
+                        
+                        # Filter invoice lines for retry
+                        if isinstance(current_invoice_lines, list):
+                            current_invoice_lines = [
+                                inv for inv in self.inv_df 
+                                if inv.get(self.rag_agent.invoice_line_identifier_field) in untagged_invoice_ids
+                            ]
+                        
+                        logger.info(f"Invoice lines for next retry: {len(current_invoice_lines)}")
+                    
+                    end_time_total = time.time()
+                    total_time = end_time_total - start_time_total
+                    
+                    logger.info("RAG Agent completed successfully (including all retries)")
+                    logger.info(f"Total time: {total_time:.2f}s")
+                    logger.info(f"Total results: {len(all_rag_results)}")
+                    
+                    logger.info(f"\nTotal matched: {len([r for r in all_rag_results if r.get('PurchaseOrderNumber') != 'null'])}")
+                    logger.info(f"Total unmatched: {len([r for r in all_rag_results if r.get('PurchaseOrderNumber') == 'null'])}")
+
+                except Exception as e:
+                    logger.error(f"!!!!!!!!!!!!!!!!!Error running RAG Agent!!!!!!!!!!!!!!!!!!!!!!!!!!!!: {e}")
+                    raise ValueError(f"Error found in RAG result. {e}")
+        results.extend(all_rag_results)
+        return results
+    
+    
