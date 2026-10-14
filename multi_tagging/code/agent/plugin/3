@@ -1,0 +1,252 @@
+
+"""
+retrieval_plugin.py
+
+Pure reusable hybrid retrieval plugin.
+
+Responsibilities:
+- Initialize and manage vector store
+- Store documents in vector store
+- Retrieve documents using hybrid search (vector similarity + keyword overlap)
+- Delete documents from vector store
+"""
+
+import time
+import logging
+from semantic_kernel.functions import kernel_function
+from sklearn.metrics.pairwise import cosine_similarity
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain.schema.document import Document
+
+logger = logging.getLogger(__name__)
+
+temp_ll1=[0,0]
+class RetrievalPlugin:
+    """
+    Pure reusable hybrid retrieval plugin.
+
+    Responsibilities:
+    - Initialize vector store
+    - Store documents with embeddings
+    - Retrieve documents using hybrid scoring
+    - Delete documents from vector store
+    """
+
+    def __init__(self):
+        """
+        Initialize the retrieval plugin.
+        Vector store will be created separately.
+        """
+        self.vector_store = None
+
+    @kernel_function(
+        description="Initialize an in-memory vector store with embeddings client.",
+        name="initialize_vector_store"
+    )
+    def initialize_vector_store(self, embeddings_client):
+        """
+        Creates and initializes an in-memory vector store.
+
+        Args:
+            embeddings_client: The embeddings client (e.g., AzureOpenAIEmbeddings)
+
+        Returns:
+            InMemoryVectorStore: The initialized vector store instance
+        """
+        self.vector_store = InMemoryVectorStore(embedding=embeddings_client)
+        return self.vector_store
+
+    @kernel_function(
+        description="Store documents with embeddings in the vector store.",
+        name="store_documents"
+    )
+    def store_documents(self, chunks, vector_store=None):
+        """
+        Adds documents to the vector store.
+
+        Expected input format:
+        [
+            {
+                "id": Any,
+                "text": str,
+                "meta_data": Any (optional)
+            }
+        ]
+
+        Args:
+            chunks: List of document chunks with id, text, and metadata
+            vector_store: Optional vector store instance (uses self.vector_store if None)
+
+        Returns:
+            bool: True if documents were successfully stored
+        """
+        if not chunks:
+            logging.info(f"Input 'chunks' cannot be empty.")
+
+        store = vector_store if vector_store is not None else self.vector_store
+
+        if store is None:
+            raise ValueError("Vector store not initialized. Call initialize_vector_store first.")
+
+        documents = []
+        for chunk in chunks:
+            documents.append(
+                Document(
+                    id=str(chunk.get("id")),
+                    page_content=chunk.get("text"),
+                    metadata=chunk.get("meta_data", {})
+                )
+            )
+
+        store.add_documents(documents=documents)
+        return True
+
+    @kernel_function(
+        description="Hybrid retrieval using vector similarity and keyword overlap.",
+        name="retrieve_documents"
+    )
+    async def retrieve_documents(
+        self,
+        query_embedding_data,
+        vector_store=None,
+        top_k: int = 5,
+        weight_to_embedding: float = 0.7,
+        weight_to_keyword: float = 0.01,
+        lambda_mult: float = 0.5,
+        doc_embeddings=None
+    ):
+        """
+        Returns ranked documents with hybrid scores.
+
+        Args:
+            query_embedding_data: Dict with keys "embedding" and "text"
+            vector_store: Optional vector store instance (uses self.vector_store if None)
+            top_k: Number of top results to return
+            weight_to_embedding: Weight for embedding similarity score
+            weight_to_keyword: Weight for keyword overlap score
+            lambda_mult: Lambda multiplier for MMR diversity
+
+        Output:
+        [
+            {
+                "id": str,
+                "content": str,
+                "score": float
+            }
+        ]
+        """
+
+        store = vector_store if vector_store is not None else self.vector_store
+
+        if store is None:
+            raise ValueError("Vector store not initialized. Call initialize_vector_store first.")
+
+        query_vec = query_embedding_data["embedding"]
+        query_text = query_embedding_data["text"]
+
+        # ---------------------------------------------------------
+        # Step 1: MMR-based candidate retrieval
+        # ---------------------------------------------------------
+        candidates = store.max_marginal_relevance_search_by_vector(
+            embedding=query_vec,
+            k=top_k * 2,
+            fetch_k=top_k * 3,
+            lambda_mult=lambda_mult
+        )
+
+        logger.info(f"POSSIBLE CANDIDATES: {candidates}")
+
+        if not candidates:
+            return []
+
+        # ---------------------------------------------------------
+        # Step 2: Get embeddings for candidates
+        # ---------------------------------------------------------
+        doc_vectors=[]
+        start_time = time.time()
+
+        if doc_embeddings:
+            doc_id=[doc.id for doc in candidates]
+            for i in range(len(doc_id)):
+                for docid in doc_embeddings:
+                    if docid.get("id")==doc_id[i]:
+                        doc_vectors.append(docid.get("embedding"))
+                        break
+
+        else:
+            doc_texts = [doc.page_content for doc in candidates]
+            doc_vectors = store.embedding.embed_documents(doc_texts)
+
+        temp_ll1[0]+=time.time() - start_time
+        
+        logger.info(f"doc_vectors count: {len(doc_vectors)}")
+        if not doc_vectors:
+            return []
+
+        # ---------------------------------------------------------
+        # Step 3: Cosine similarity
+        # ---------------------------------------------------------
+        cosine_scores = cosine_similarity([query_vec], doc_vectors)[0]
+
+        # Normalize to [0,1]
+        # cosine_scores = [(s + 1) / 2 for s in cosine_scores]
+
+        # ---------------------------------------------------------
+        # Step 4: Hybrid scoring
+        # ---------------------------------------------------------
+        query_keywords = set(query_text.lower().split())
+        scored_docs = []
+
+        for idx, doc in enumerate(candidates):
+            doc_keywords = set(doc.page_content.lower().split())
+            keyword_overlap = len(query_keywords & doc_keywords)
+
+            hybrid_score = 0.0
+            if weight_to_keyword == 0:
+                hybrid_score = cosine_scores[idx]
+            else:
+                hybrid_score = (
+                    weight_to_embedding * cosine_scores[idx]
+                    + weight_to_keyword * keyword_overlap
+                )
+
+            scored_docs.append({
+                "id": str(doc.id),
+                "content": doc.page_content,
+                "score": hybrid_score
+            })
+
+        scored_docs.sort(key=lambda x: x["score"], reverse=True)
+
+        logger.info(f"Retrieval completed in {time.time() - start_time:.2f}s")
+        return scored_docs[:top_k]
+
+
+    @kernel_function(
+        description="Delete documents from vector store using document IDs.",
+        name="delete_documents"
+    )
+    def delete_documents(self, ids_to_delete, vector_store=None):
+        """
+        Deletes documents from the given vector store.
+
+        Args:
+            ids_to_delete: List of document IDs to delete
+            vector_store: Optional vector store instance (uses self.vector_store if None)
+
+        Returns:
+            bool: True if deletion was attempted
+        """
+        if not ids_to_delete:
+            return True
+
+        store = vector_store if vector_store is not None else self.vector_store
+
+        if store is None:
+            raise ValueError("Vector store not initialized. Call initialize_vector_store first.")
+
+        # LangChain expects string IDs
+        ids = [str(_id) for _id in ids_to_delete]
+        store.delete(ids=ids)
+
+        return True
