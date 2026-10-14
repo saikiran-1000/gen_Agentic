@@ -1,0 +1,121 @@
+"""Output Validation Module for GRN Variance Analysis.
+
+This module provides output validation schemas and functions to ensure data integrity for LLM responses and final analysis results. It uses Pydantic models to validate structure and content before returning results to downstream systems.
+"""
+
+import logging
+from typing import List, Dict, Any
+
+from pydantic import BaseModel, ValidationError
+
+
+logger = logging.getLogger(__name__)
+
+class LLMOutput(BaseModel):
+    """Schema for validating LLM response structure.
+
+    Validates LLM-generated responses to ensure all required fields are present
+    with correct data types for variance analysis recommendations.
+
+    Attributes:
+        product_classification (str): Classification of the product/material
+        threshold_used (str): Threshold value applied for analysis
+        threshold_method (str): Method used for threshold determination
+        justification (str): Reasoning behind the recommendation
+    """
+    product_classification: str
+    threshold_used: str
+    threshold_method: str
+    justification: str
+
+
+class InvoiceLineItemResults(BaseModel):
+    """Schema for individual line item analysis results.
+
+    Represents the final processed result for a single invoice line item
+    including variance calculations and LLM-generated justifications.
+    
+    Attributes:
+        invoiceLineID (str): Unique identifier for the invoice line item
+        materialDescription (str): Description of the material/product
+        materialID (str): Unique material identifier
+        variance (str): Calculated GRN variance percentage
+        justification (str): AI-generated or business rule justification
+    """
+    invoiceLineID: str
+    materialDescription: str
+    materialID: str
+    variance: str
+    justification: str
+
+
+class FinalOutput(BaseModel):
+    """Schema for complete analysis results.
+    
+    Top-level schema for the final output containing all processed line items
+    and vendor information for the analyzed invoice.
+    
+    Attributes:
+        vendorID (str): Unique vendor identifier
+        invoiceLineItemsResults (List[InvoiceLineItemResults]): List of processed line items
+        invoiceDate (str): Date of the invoice
+        invoiceID (str): Unique invoice identifier
+    """
+    vendorID: str
+    invoiceLineItemsResults: List[InvoiceLineItemResults]
+    invoiceDate: str
+    invoiceID: str
+
+def llm_response_validation(llm_response: Dict[str, Any]) -> None:
+    """Validate LLM response structure and content.
+
+    Ensures AI-generated responses contain all required fields with correct
+    data types before further processing.
+
+    Args:
+        llm_response (dict): Raw LLM response to validate
+    """
+    logger.info("Starting LLM response validation")
+    try:
+        LLMOutput(**llm_response)
+        logger.info("LLM response validation successful")
+    except ValidationError as e:
+        logger.error(f"LLM response validation failed: {e}", exc_info=True)
+        for error in e.errors():
+            logger.error(f"Validation error - Field: {error.get('loc')}, "
+                        f"Type: {error.get('type')}, Message: {error.get('msg')}")
+        error_message = (
+            f"##GRN-VALIDATION-ERROR## Output JSON Schema Validation Error: {e}"
+        )
+        raise ValueError(error_message) from e
+
+
+def output_validation(results: Dict[str, Any]) -> None:
+    """Validate final analysis results format.
+
+    Ensures the complete analysis results conform to expected schema
+    before returning to downstream.
+
+    Args:
+        results (dict): Final analysis results to validate
+    """
+    logger.info("Starting final output validation")
+    invoice_id = results.get("invoiceID", "Unknown")
+    num_line_items = len(results.get("invoiceLineItemsResults", []))
+    logger.info(f"Validating results for invoice ID: {invoice_id}, Line items: {num_line_items}")
+
+    try:
+        FinalOutput(**results)
+        logger.info(f"Final output validation successful for invoice ID: {invoice_id}")
+    except ValidationError as e:
+        logger.error(f"Final output validation failed for invoice ID: {invoice_id}: {e}", exc_info=True)
+        error_message = (
+            f"##GRN-VALIDATION-ERROR## Output JSON Schema Validation Error: {e}"
+        )
+        raise ValueError(error_message) from e
+    except Exception as e:
+        logger.error(f"Unexpected error during output validation for invoice ID: {invoice_id}: {str(e)}", exc_info=True)
+        error_message = (
+            f"##GRN-VALIDATION-ERROR## Output JSON Schema Validation Error: {e}"
+        )
+        raise ValueError(error_message) from e
