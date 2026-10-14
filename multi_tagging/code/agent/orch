@@ -1,0 +1,231 @@
+from semantic_kernel import Kernel
+from semantic_kernel.agents import ChatCompletionAgent
+from semantic_kernel.connectors.ai.open_ai import AzureChatPromptExecutionSettings
+from semantic_kernel.functions import KernelArguments
+from typing import Dict, List
+import json
+import logging
+from pydantic import BaseModel, ValidationError, field_validator, Field
+
+logger = logging.getLogger(__name__)
+
+class WorkflowResponse(BaseModel):
+    """Pydantic model for orchestrator workflow response."""
+    plugins: List[str] = Field(
+        description="List of plugin names to execute in sequence",
+        min_length=1
+    )
+    
+    @field_validator('plugins')
+    @classmethod
+    def validate_plugins(cls, v: List[str]) -> List[str]:
+        """Validate that all plugins are from the allowed set."""
+        allowed_plugins = {
+            "inputdatahandlerplugin",
+            "rulebasedplugin",
+            "embeddingplugin",
+            "retrievalplugin",
+            "ragagent",
+            "llmreasoningagent",
+            "salesforcestatusplugin"
+        }
+        
+        if not v:
+            raise ValueError("Plugin list cannot be empty")
+        
+        invalid = [p for p in v if p.lower() not in allowed_plugins]
+        if invalid:
+            raise ValueError(f"Invalid plugin(s): {invalid}. Allowed plugins: {allowed_plugins}")
+        
+        return v
+
+
+class OrchestratorAgent:
+    """An intelligent orchestration agent that decides the sequence of plugin execution."""
+    
+    KNOWN_PLUGINS = [
+        "InputDataHandlerPlugin",
+        "RuleBasedPlugin",
+        "EmbeddingPlugin",
+        "RetrievalPlugin",
+        "RAGAgent",
+        "LLMReasoningAgent",
+        "SalesforceStatusPlugin"
+    ]
+    
+    def __init__(self, kernel: Kernel, config=None, system_prompt=None):
+        self.config_from_json = config
+        self.kernel = kernel
+        self.kernel_settings = AzureChatPromptExecutionSettings(
+            temperature=self.config_from_json.get("TEMPERATURE"),  # Changed from 0.2 for more deterministic output
+            top_p=0.9,
+            max_tokens=100  # Limit output since we only need a short array
+        )
+        self.system_prompt = system_prompt
+        self.agent = self._create_orchestrator_agent()
+
+    def _create_orchestrator_agent(self) -> ChatCompletionAgent:
+        """Creates the chat-based orchestrator reasoning agent."""
+        try:
+            return ChatCompletionAgent(
+                name="OrchestratorAgent",
+                description="Decides the plugins execution sequence for invoice–PO matching",
+                instructions=self.system_prompt,
+                kernel=self.kernel,
+                arguments=KernelArguments(
+                    temperature=self.kernel_settings.temperature,
+                    top_p=self.kernel_settings.top_p,
+                    max_tokens=self.kernel_settings.max_tokens
+                )
+            )
+        except Exception as e:
+            logger.error(f"Error initializing OrchestratorAgent: {e}")
+            raise
+
+    def _parse_workflow_response(self, content: str) -> List[str]:
+        """Parse and validate the orchestrator workflow response using Pydantic."""
+        if not content:
+            logger.warning("Empty response from orchestrator")
+            # return []
+            raise ValueError(f"No response from orchestrator")
+
+        content = content.strip()
+        logger.info(f"Parsing workflow response: {content}")
+        
+        # Strategy 1: Try direct JSON array parsing
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list):  
+                workflow = WorkflowResponse(plugins=parsed)
+                logger.info(f"Direct array parse: {workflow.plugins}")
+                return workflow.plugins
+            elif isinstance(parsed, dict) and 'plugins' in parsed:
+                workflow = WorkflowResponse.model_validate(parsed)
+                logger.info(f"Direct object parse: {workflow.plugins}")
+                return workflow.plugins
+        except (json.JSONDecodeError, ValidationError) as e:
+            logger.debug(f"Direct parsing failed: {e}")
+
+        # Strategy 2: Extract JSON from code blocks or markdown
+        import re
+        patterns = [
+            (r'```(?:json)?\s*(\[.*?\])\s*```', "code block array"),
+            (r'```(?:json)?\s*(\{.*?\})\s*```', "code block object"),
+            (r'(\[[\s\S]*?\])', "raw array"),
+            (r'"plugins"\s*:\s*(\[.*?\])', "plugins key"),
+            (r'(\{[^{}]*"plugins"[^{}]*\})', "inline object")
+        ]
+
+        for pattern, desc in patterns:
+            match = re.search(pattern, content, re.DOTALL)
+            if match:
+                json_text = match.group(1)
+                try:
+                    parsed = json.loads(json_text)
+                    
+                    if isinstance(parsed, list):
+                        workflow = WorkflowResponse(plugins=parsed)
+                        logger.info(f"Extracted {desc}: {workflow.plugins}")
+                        return workflow.plugins
+                    elif isinstance(parsed, dict):
+                        workflow = WorkflowResponse.model_validate(parsed)
+                        logger.info(f"Extracted {desc}: {workflow.plugins}")
+                        return workflow.plugins
+                        
+                except (json.JSONDecodeError, ValidationError) as e:
+                    logger.debug(f"Failed to parse {desc}: {e}")
+                    continue
+
+        # Strategy 3: Manual extraction as last resort
+        found_plugins = [p for p in self.KNOWN_PLUGINS if p in content]
+        if found_plugins:
+            try:
+                workflow = WorkflowResponse(plugins=found_plugins)
+                logger.warning(f"Fallback extraction: {workflow.plugins}")
+                return workflow.plugins
+            except ValidationError as e:
+                logger.error(f"Manual extraction validation failed: {e}")
+
+        logger.error(f"Failed to parse workflow from: {content}")
+        return []
+
+    async def get_workflow(self, context: dict) -> List[str]:
+        """Generates the sequence of plugin calls from the orchestrator.
+        
+        Args:
+            context: Dictionary containing 'Rules' key with value 'yes' or 'no'
+        
+        Returns:
+            List of plugin names to execute in sequence
+        """
+        # CRITICAL FIX: Convert context dict to a proper message string
+        rules_value = context.get("Rules", "no")
+        invoice_count = len(context.get("invoice_lines", []))
+        po_count = len(context.get("po_lines", []))
+        # Create a clear user message with the context
+        user_message = f"""Context: {json.dumps({"Rules": rules_value})}
+
+Determine the plugin execution sequence based on the Rules value above."""
+        
+        logger.info(f"Sending to orchestrator: {user_message}")
+        print(f"Orchestrator input: Rules={rules_value}")
+        
+        responses = []
+        try:
+            async for message in self.agent.invoke(user_message):
+                content_str = self._extract_content(message)
+                if content_str:
+                    responses.append(content_str)
+        except Exception as e:
+            logger.error(f"Error invoking orchestrator agent: {e}")
+            return []
+        
+        if not responses:
+            logger.warning("No responses from orchestrator agent")
+            return []
+        
+        # Get the last response content
+        content = responses[-1]
+        logger.info(f"Raw orchestrator response: {content}")
+        print(f"Raw orchestrator response: {content}")
+        
+        # Parse the workflow
+        workflow = self._parse_workflow_response(content)
+        logger.info(f"Final workflow: {workflow}")
+        print(f"Final workflow: {workflow}")
+        
+        return workflow
+
+    def _extract_content(self, message) -> str:
+        """Extract text content from ChatMessageContent object."""
+        try:
+            if hasattr(message, 'content') and message.content:
+                return str(message.content)
+            elif hasattr(message, 'text') and message.text:
+                return str(message.text)
+            elif hasattr(message, 'items') and message.items:
+                return ''.join(str(item.text) for item in message.items if hasattr(item, 'text'))
+            else:
+                return str(message)
+        except Exception as e:
+            logger.error(f"Error extracting content from message: {e}")
+            return ""
+
+
+# Usage example:
+"""
+# Initialize
+orchestrator = OrchestratorAgent(kernel=your_kernel)
+
+# Get workflow - pass context dict as before
+context = {
+    "invoice_lines": [...],
+    "po_lines": [...], 
+    "Rules": "yes"  # or "no"
+}
+
+workflow = await orchestrator.get_workflow(context)
+print("Orchestrator decided workflow:", workflow)
+# Output when Rules="yes": ['InputDataHandlerPlugin', 'RuleBasedPlugin', 'RAGAgent']
+# Output when Rules="no": ['InputDataHandlerPlugin', 'RAGAgent']
+"""
