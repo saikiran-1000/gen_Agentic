@@ -1,0 +1,475 @@
+import pyodbc
+from typing import Tuple
+import os
+import time
+import json 
+import logging
+import pandas as pd
+logger = logging.getLogger(__name__)
+# logger.setLevel(logging.INFO)
+
+def connect_db() -> Tuple[pyodbc.Connection, pyodbc.Cursor]:
+    """
+    Establish a connection to the SQL Server database.
+
+    Returns:
+        Tuple[pyodbc.Connection, pyodbc.Cursor]: Connection and cursor objects
+
+    Raises:
+        RuntimeError: If connection fails
+    """
+    server = os.getenv('SQL_SERVER')
+    database = os.getenv('SQL_DATABASE')
+
+    try:
+        logger.info("Attempting to connect to SQL Server: %s, Database: %s", server, database)
+
+        for attempt in range(5):
+            try:
+                conn = pyodbc.connect(
+                    "Driver={ODBC Driver 18 for SQL Server};"
+                    f"Server=tcp:{server},1433;"
+                    f"Database={database};"
+                    "Authentication=ActiveDirectoryMSI;"
+                    "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
+                )
+                cursor = conn.cursor()
+                print("Connected successfully on attempt", attempt+1)
+                break
+            except Exception as e:
+                print("Connection failed, retrying...", e)
+                time.sleep(2)
+
+        # cursor = conn.cursor()
+        logger.info("Database connection established successfully.")
+        return conn, cursor
+
+    except Exception as e:
+        logger.exception("Database connection failed.")
+        raise RuntimeError(f"Database connection failed: {e}") from e
+
+def build_header_filters(request: dict, config: dict) -> dict:
+    """
+    Build header filters for SQL queries from request and config mapping.
+
+    Args:
+        request (dict): Incoming request payload
+        config (dict): Configuration containing header_mapping
+
+    Returns:
+        dict: Mapping of DB column -> request value
+
+    Raises:
+        ValueError: If required fields are missing in request
+    """
+    try:
+        logger.info("Building header filters...")
+        header_field_dict = config.get("header_mapping", {})
+        header_sql = {}
+
+        for request_field, db_field in header_field_dict.items():
+            if request_field not in request:
+                error_msg = f"Missing required header field: {request_field}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            header_sql[db_field] = request[request_field]
+            logger.debug("Mapped request field '%s' to DB column '%s'", request_field, db_field)
+
+        logger.info("Header filters built successfully: %s", header_sql)
+        return header_sql
+
+    except Exception as e:
+        logger.exception("Error while building header filters.")
+        raise
+
+def build_line_item_filters(request: dict, config: dict) -> list[dict]:
+    """
+    Build line item filters for SQL queries from request and config mapping.
+
+    Args:
+        request (dict): Incoming request payload
+        config (dict): Configuration containing line_detail_mapping and invoice_line_field_name
+
+    Returns:
+        list[dict]: List of mappings {db_column: request_value} for each line item
+
+    Raises:
+        ValueError: If required fields are missing in request or line items
+    """
+    try:
+        logger.info("Building line item filters...")
+
+        line_detail_field_dict = config.get("line_detail_mapping", {})
+        line_item_key = config.get("invoice_line_field_name")
+
+        if line_item_key not in request:
+            error_msg = f"Missing invoice line field in request: {line_item_key}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        line_detail_sql = []
+        for i, sub_col in enumerate(request[line_item_key], start=1):
+            mydict = {}
+            for request_field, db_field in line_detail_field_dict.items():
+                if request_field not in sub_col:
+                    error_msg = f"Missing required line field: {request_field} in line {i}"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                mydict[db_field] = sub_col[request_field]
+
+            if mydict not in line_detail_sql:
+                line_detail_sql.append(mydict)
+                logger.debug("Line %d mapped to: %s", i, mydict)
+
+        logger.info("Line item filters built successfully. Total unique lines: %d", len(line_detail_sql))
+        return line_detail_sql
+
+    except Exception as e:
+        logger.exception("Error while building line item filters.")
+        raise
+
+def fetch_filtered_rows(
+    cursor: Tuple[pyodbc.Connection, pyodbc.Cursor], 
+    header_sql: dict, 
+    line_detail_sql: list[dict], 
+    config: dict
+) -> list:
+    """
+    Fetch rows from the database table using header filters and optional line item filters.
+
+    Args:
+        cursor (pyodbc.Cursor): Active database cursor
+        header_sql (dict): Mapping of header filters {column: value}
+        line_detail_sql (list[dict]): List of line item filters [{col: val, ...}, ...]
+        config (dict): Configuration containing table_name and all_field_to_fetch
+
+    Returns:
+        list: List of rows as dictionaries {col_name: value}
+    """
+    try:
+        logger.info("Starting fetch_filtered_rows...")
+
+        table_name = config["table_name"]
+        col_name = list(set(config["all_field_to_fetch"]+config["filter_field_name"]))
+        columns = ", ".join(col_name)
+
+        header_conditions = []
+        header_values = []
+
+        for col, val in header_sql.items():
+            if col in col_name:
+                header_conditions.append(f"{col} = ?")
+                header_values.append(val)
+        header_where = " AND ".join(header_conditions)
+
+        if not line_detail_sql:
+            query = f"SELECT {columns} FROM {table_name} WHERE {header_where};"
+            params = header_values
+        else:
+
+            unique_keys = set().union(*(line.keys() for line in line_detail_sql))
+            logger.debug("Unique keys in line_detail_sql: %s", unique_keys)
+
+            if len(unique_keys) == 1:
+                col = list(unique_keys)[0]
+                placeholders = ", ".join(["?"] * len(line_detail_sql))
+                line_values = [line[col] for line in line_detail_sql]
+                query = f"""
+                    SELECT {columns} FROM {table_name}
+                    WHERE {header_where} AND {col} IN ({placeholders});
+                """
+                params = header_values + line_values
+            else:
+                or_clauses = []
+                params = []
+                for line in line_detail_sql:
+                    conds = []
+                    vals = []
+                    for col, val in line.items():
+                        if col in col_name:
+                            conds.append(f"{col} = ?")
+                            vals.append(val)
+                    clause = f"({header_where} AND {' AND '.join(conds)})"
+                    or_clauses.append(clause)
+                    params.extend(header_values + vals)
+
+                logger.debug("OR clauses: %s", or_clauses)
+                where_clause = " OR ".join(or_clauses)
+                query = f"""
+                    SELECT {columns} FROM {table_name}
+                    WHERE {where_clause};
+                """.strip()
+
+        logger.info("Executing query: %s", query.strip())
+        logger.debug("With params: %s", params)
+        cursor.execute(query, params)
+        col_names = [col[0] for col in cursor.description]
+        rows = cursor.fetchall()
+
+        logger.info("Query executed successfully. Rows fetched: %d", len(rows))
+        output=[dict(zip(col_names, row)) for row in rows]
+        return output
+
+    except Exception as e:
+        logger.exception(
+            "Error in fetch_filtered_rows while executing query. "
+            "Table: %s | Header filters: %s | Line filters count: %d",
+            config.get("table_name"),
+            header_sql,
+            len(line_detail_sql) if line_detail_sql else 0
+        )
+        raise RuntimeError(
+            f"While fetching data from database: fetch_filtered_rows failed for table '{config.get('table_name')}'. "
+            f"Check logs for query and parameters. Original error: {e}"
+        ) from e
+
+
+def add_historical_data(request: dict, query_rows: list, config: dict) -> dict:
+    """
+    Add historical data from query_rows to each invoice line in the request.
+
+    Args:
+        request (dict): Incoming request payload containing invoice lines
+        query_rows (list): Rows fetched from database (list of dicts)
+        config (dict): Configuration with line_detail_mapping, all_field_to_fetch, and filter_field_name
+
+    Returns:
+        dict: Updated request with "historical_data" added to each invoice line
+    """
+
+    try:
+        logger.info("Adding historical data to request...")
+        line_mapping = config["line_detail_mapping"]
+        invoice_line_field = config["invoice_line_field_name"]
+        invoice_date = request.get(config.get("invoice_date_field"))
+        lookup = {}
+        for row in query_rows:
+            try:
+                valid_fields = [
+                    sql_field for sql_field in line_mapping.values()
+                    if sql_field in list(set(config["all_field_to_fetch"]+config["filter_field_name"]))
+                ]
+                key = tuple(row[sql_field] for sql_field in valid_fields)
+
+                lookup.setdefault(key, []).append(row)
+                logger.debug("Row mapped to key %s: %s", key, row)
+
+            except KeyError as e:
+                logger.warning(
+                    "Row missing expected field %s (from valid_fields %s): %s",
+                    e, valid_fields, row
+                )
+
+        for i, line in enumerate(request[invoice_line_field], start=1):
+            try:
+                valid_req_fields = [
+                    req_field for req_field, sql_field in line_mapping.items()
+                    if sql_field in list(set(config["all_field_to_fetch"]+config["filter_field_name"]))
+                ]
+                key = tuple(line[req_field] for req_field in valid_req_fields)
+            except KeyError as e:
+                logger.error("Line %d missing expected field %s: %s", i, e, line)
+                continue
+            try:
+                line["historicalData"] = []
+
+                if key in lookup:
+
+                    df = pd.DataFrame(lookup[key])
+                    date_col = config.get("date_field_in_database")
+                    last_n_days = config.get("historical_data_duration")
+                    if date_col not in df.columns:
+                        logger.exception("Date field not present in historical data")
+                        raise ValueError("Date field not present in historical data")
+
+                    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
+                    logger.info(f"Original lookup df: {len(df)}")
+                    # Calculate cutoff (last 365 days)
+                    # cutoff_date = pd.to_datetime(invoice_date, errors="coerce") - pd.Timedelta(days=last_n_days)
+
+                    # # Filter last 365 days
+                    # df_recent = df[df[date_col] >= cutoff_date]
+
+                    cutoff_date = pd.to_datetime(invoice_date, errors="coerce") - pd.Timedelta(days=last_n_days)
+
+                    upper_date = pd.to_datetime(invoice_date, errors="coerce")
+
+                    df_recent = df[(df[date_col] >= cutoff_date) & (df[date_col] <= upper_date)]
+
+                    logger.info(f"lookup df for last n days: {len(df_recent)}")
+
+                    # Loop through filtered rows only
+                    for _, row in df_recent.iterrows():
+                        filtered = {
+                        field: (
+                            row.get(field).strftime("%Y-%m-%d")
+                            if isinstance(row.get(field), pd.Timestamp)
+                            else row.get(field)
+                        )
+                        for field in config["all_field_to_fetch"]
+                        }
+                        line["historicalData"].append(filtered)
+
+                    ############################################
+                # line["historicalData"] = []
+                # if key in lookup:
+                #     for row in lookup[key]:
+                #         filtered = {
+                #             field: row.get(field)
+                #             for field in config["all_field_to_fetch"]
+                #             # if field not in config["filter_field_name"]
+                #         }
+                #         line["historicalData"].append(filtered)
+                    ###############################################
+                    logger.info(
+                        "Line %d enriched with %d historical rows.",
+                        i, len(line["historicalData"])
+                    )
+            except Exception as e:
+                logger.error("Error enriching historicalData: %s", e)
+                raise ValueError(f"Error in adding historical data: {e}")
+
+        logger.info("Historical data enrichment completed.")
+        return request
+
+    except Exception as e:
+        logger.exception("Error in add_historical_data.")
+        raise RuntimeError(f"Failed to add historical data to request: {e}") from e
+
+
+def validation_check(request: dict, config: dict) -> bool:
+    """
+    Validate request payload against required config mappings.
+    
+    Args:
+        request (dict): Incoming request payload
+        config (dict): Configuration with header and line mappings
+    
+    Returns:
+        bool: True if validation passes
+    
+    Raises:
+        ValueError: If any required field is missing
+    """
+    try:
+        logger.info("Starting validation check...")
+
+        header_field_needed = list(config["header_mapping"].keys())
+        lines_field_needed = list(config["line_detail_mapping"].keys())
+        invoice_line_field = config["invoice_line_field_name"]
+        logger.info(f"invoice_line_field- {invoice_line_field}")
+        logger.info(f"Request- {request}")
+
+        for col_name in header_field_needed:
+            if col_name not in request:
+                error_msg = f"Missing header field: {col_name}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+        logger.info("Header fields validation passed.")
+
+        if invoice_line_field not in request:
+            error_msg = f"Missing invoice line field: {invoice_line_field}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        logger.info("Invoice line field validation passed.")
+
+        for i, sub_col in enumerate(request[invoice_line_field], start=1):
+            for col_name in lines_field_needed:
+                if col_name not in sub_col:
+                    error_msg = f"Missing line field: {col_name} in line {i}"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+
+        logger.info("Line detail fields validation passed.")
+        logger.info("Validation check completed successfully.")
+        return True
+
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.exception("Unexpected error during validation.")
+        raise
+
+def main_sql(request: dict,config: dict) -> dict:
+    """
+    Main pipeline to validate request, fetch data, and enrich with historical data.
+
+    Args:
+        request (dict): Incoming request payload
+        config (dict): Configuration dictionary
+
+    Returns:
+        dict: Updated request with historical data, or error response if failure
+    """
+    for item in request.get(config.get("invoice_line_field_name"), []):
+        qty_field = config.get("grn_qty_field_in_line_detail")
+        value = item.get(qty_field)
+
+        if isinstance(value, str):
+            # Handle comma-separated numbers like "34,23"
+            if "," in value:
+                try:
+                    parts = [float(p.strip()) for p in value.split(",")]
+                    item[qty_field] = sum(parts)
+                except ValueError:
+                    # if not numeric, leave as is or raise error
+                    logger.warning(f"Non-numeric value in {qty_field}: {value}")
+            else:
+                try:
+                    item[qty_field] = float(value)
+                except ValueError:
+                    logger.warning(f"Invalid integer in {qty_field}: {value}")
+
+    conn = None
+    cursor = None
+
+    try:
+        logger.info("Main process started.")
+
+        check = validation_check(request, config)
+        if not check:
+            logger.error("Validation failed.")
+            return {"status": "error", "message": "Validation failed."}
+
+        conn, cursor = connect_db()
+
+        header_sql = build_header_filters(request, config)
+        line_detail_sql = build_line_item_filters(request, config)
+
+        rows = fetch_filtered_rows(cursor, header_sql, line_detail_sql, config)
+
+        query_rows = json.loads(json.dumps(rows, indent=2, default=str))
+        logger.info("Rows fetched and serialized. Count: %d", len(query_rows))
+
+        updated_result = add_historical_data(request, query_rows, config)
+
+        logger.info("Main process completed successfully.")
+        return {"status": "success","status_code":200, "data": updated_result}
+
+    except Exception as e:
+        logger.exception("Error in main pipeline.")
+        return {
+            "status_code":400,
+            "status": "error",
+            "message": f"Main pipeline failed: {e}"
+        }
+
+    finally:
+        if cursor:
+            try:
+                cursor.close()
+                logger.debug("Cursor closed.")
+            except Exception:
+                logger.warning("Failed to close cursor.")
+        if conn:
+            try:
+                conn.close()
+                logger.debug("Connection closed.")
+            except Exception:
+                logger.warning("Failed to close connection.")
+
+# res=main(request,config)
+# print(res)
