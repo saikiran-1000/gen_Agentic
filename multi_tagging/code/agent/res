@@ -1,0 +1,70 @@
+import os
+from typing import Tuple
+from openai import AzureOpenAI
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
+from semantic_kernel.functions import kernel_function
+
+class LLMReasoningAgent:
+    """
+    LLM Reasoning Agent plugin for invoice-PO matching using Azure OpenAI with reasoning capabilities.
+    """
+
+    def __init__(self):
+        self.client = self.get_azure_openai_client()
+    # print(safe_text(content))
+
+    def get_azure_openai_client(self) -> AzureOpenAI:
+        """Initialize Azure OpenAI client."""
+        return AzureOpenAI(
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+        )
+
+    @kernel_function(
+        description="Generate LLM Response.",
+        name="generate_response"
+    )
+    def generate_response(self, system_prompt, user_prompt,reasoning_effort, temperature = 1):
+        """
+        Invoke the LLM with system and user prompts.
+        
+        Args:
+            system_prompt: System instructions for the LLM
+            user_prompt: User query/input for the LLM
+            temperature: Temperature for response generation
+            
+        Returns:
+            Tuple of (response_content, total_tokens)
+        """
+        
+        try:
+            # Build the request parameters
+
+            request_params = {
+                "model": os.getenv("AZURE_OPENAI_MODEL"),
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "max_completion_tokens": 8192,
+                # "temperature": temperature
+            }
+            
+            # Add reasoning_effort only if it's configured and not None/empty
+            if reasoning_effort and reasoning_effort.lower() not in ["none", "no", ""]:
+                request_params["reasoning_effort"] = reasoning_effort
+
+            response = self.client.chat.completions.create(**request_params)
+            
+            content = response.choices[0].message.content
+            # print(f"RAW RESPONSE: {response}")
+            # print(f"RAW CONTENT: {content}")
+            total_tokens = response.usage.total_tokens
+            content = content.encode("utf-8", errors="ignore").decode("utf-8")
+            return content, total_tokens
+            
+        except Exception as e:
+            # print(f"Error calling Azure OpenAI: {e}")
+            raise ValueError(f"Error calling Azure OpenAI: {e}")
