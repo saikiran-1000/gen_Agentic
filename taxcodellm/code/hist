@@ -1,0 +1,443 @@
+
+import os
+import json
+import time
+import logging
+from datetime import datetime
+from openai import AzureOpenAI
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
+from azure.search.documents.models import VectorizedQuery
+
+logger = logging.getLogger(__name__)
+# from dotenv import load_dotenv
+# load_dotenv()
+
+def validate_config(config: dict, input_data: dict):
+    """
+    Validate config against input_data and internal rules.
+    Returns:
+        (True, None) if valid
+        (False, "error message") if invalid
+    """
+
+    try:
+        # ---------------------------------------------------------
+        # 1. Check line_detail_identifier & master_data_identifier
+        # ---------------------------------------------------------
+        line_key = config.get("line_detail_identifier_in_input")          # e.g., "invoiceLineItems"
+        master_key = config.get("master_data_identifier_in_input")        # e.g., "taxMasterDataLineItems"
+
+        # line_key MUST be inside input_data
+        if line_key not in input_data:
+            return False, f"Missing '{line_key}' in input_data."
+
+        line_records = input_data.get(line_key, [])
+
+        # master_key MUST exist **inside each line item**, not in input_data root
+        for idx, rec in enumerate(line_records):
+            if master_key not in rec:
+                return False, (
+                    f"Missing '{master_key}' inside '{line_key}' at index {idx}."
+                )
+
+        # Use master data from first line item (structure assumed same)
+        master_records = line_records[0].get(master_key, [])
+
+        if not master_records:
+            return False, f"'{master_key}' is empty inside '{line_key}'."
+
+        # ---------------------------------------------------------
+        # 2. field_to_extract_from_master_data must exist inside master records
+        # ---------------------------------------------------------
+        field_to_extract = config.get("field_to_extract_from_master_data")
+
+        for idx, rec in enumerate(master_records):
+            if field_to_extract not in rec:
+                return False, (
+                    f"'{field_to_extract}' not found in master record index {idx} "
+                    f"inside '{master_key}'."
+                )
+
+        # ---------------------------------------------------------
+        # 3. required_unique_field & arrangement_field must exist in relevant_fields
+        # ---------------------------------------------------------
+        relevant_cols = config.get("AzureAIConfig").get("relevant_fields", [])
+
+        required_unique_field = config.get("required_unique_field")
+        arrangement_field = config.get("arrangement_field")
+
+        if required_unique_field not in relevant_cols:
+            return False, (
+                f"required_unique_field '{required_unique_field}' not found "
+                f"in relevant_fields."
+            )
+
+        if arrangement_field not in relevant_cols:
+            return False, (
+                f"arrangement_field '{arrangement_field}' not found "
+                f"in relevant_fields."
+            )
+
+        # ---------------------------------------------------------
+        # 4. apply_filter_on_this_fields fields must be in filterable + searchable
+        # ---------------------------------------------------------
+        apply_filters = config.get("apply_filter_on_this_fields", {})
+        filterable = config["AzureAIConfig"].get("filterable", [])
+        searchable = config["AzureAIConfig"].get("searchable", [])
+        allowed_fields = set(filterable + searchable)
+
+        for category, fields in apply_filters.items():
+            for f in fields:
+                if f not in allowed_fields:
+                    return False, (
+                        f"Field '{f}' under '{category}' must be present in either "
+                        f"searchable or filterable fields of AzureAIConfig."
+                    )
+
+        return True, None
+
+    except Exception as e:
+        return False, f"Unexpected validation error: {str(e)}"
+
+
+# ------------------- SAFE DATE PARSER -------------------
+def parse_date_safe(date_str):
+    """Try multiple formats for safety."""
+    if not date_str:
+        return None
+
+    formats = ["%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d", "%d-%m-%Y"]
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except:
+            continue
+    logger.warning("Failed to parse date: %s", date_str)
+    return None
+
+
+# # ------------------- BUILD FILTER STRING -------------------
+# def build_filter(field_name, values):
+#     """Build Azure Search OData filter."""
+#     try:
+#         if not values:
+#             return None
+#         if isinstance(values, str):
+#             values = [values]
+#         if len(values) == 1:
+#             return f"{field_name} eq '{values[0]}'"
+#         return " or ".join([f"{field_name} eq '{v}'" for v in values])
+#     except Exception as e:
+#         logger.exception("Error in build_filter for field '%s': %s", field_name, e)
+#         return None
+def build_filter(field_name, values):
+    try:
+        if not values:
+            return None
+        if isinstance(values, str):
+            values = [values]
+
+        if len(values) == 1:
+            return f"{field_name} eq '{values[0]}'"
+
+        # FIX → wrap OR conditions inside parentheses
+        or_block = " or ".join([f"{field_name} eq '{v}'" for v in values])
+        return f"({or_block})"
+    except Exception as e:
+        logger.exception("Error in build_filter for field '%s': %s", field_name, e)
+        return None
+
+# ------------------- MAIN SEARCH FUNCTION -------------------
+def run_search_for_query(client, search_client, config, query):
+    logger.info("Executing search for query: %s", query)
+
+    try:
+        azure_conf = config["AzureAIConfig"]
+        embedding_model = config["embedding_model"]
+        vector_field = list(azure_conf["vector_fields"].keys())[0]
+
+        searchable_fields = azure_conf["searchable"]
+        filterable_fields = azure_conf["filterable"]
+        retrievable_fields = azure_conf["retrievable"]
+
+        top_n = config.get("number_of_historical_data_needed", 100)
+        unique_field = config.get("required_unique_field", "lineItemDescription")
+        arrangement_fields = config.get("arrangement_field", [])
+        only_unique = str(config.get("only_unique_description", "yes")).lower()
+
+        new_top_n = top_n * 3 if only_unique == "yes" else top_n
+
+    except Exception as e:
+        logger.exception("Error extracting search config: %s", e)
+        return []
+
+    # ---------------- FILTER BUILDING ----------------
+    try:
+        filters = []
+        for field in filterable_fields:
+            if field in query and query[field]:
+                f = build_filter(field, query[field])
+                if f:
+                    filters.append(f)
+
+        filter_str = " and ".join(filters) if filters else None
+        logger.info("Generated filter string: %s", filter_str)
+    except Exception as e:
+        logger.exception("Error building filter string: %s", e)
+        filter_str = None
+
+    # ---------------- EMBEDDING ----------------
+    try:
+        search_text = query.get(searchable_fields[0])
+        if not search_text:
+            logger.warning("No search text found. Returning empty results.")
+            return []
+
+        embedding = client.embeddings.create(
+            model=embedding_model,
+            input=search_text
+        ).data[0].embedding
+
+        logger.info("Generated embedding successfully.")
+
+    except Exception as e:
+        logger.exception("Error generating embedding: %s", e)
+        return []
+
+    # ---------------- VECTOR SEARCH ----------------
+    try:
+        vector_query = VectorizedQuery(
+            vector=embedding,
+            fields=vector_field,
+            k_nearest_neighbors=new_top_n
+        )
+
+        results_iterable = search_client.search(
+            search_text=None,
+            vector_queries=[vector_query],
+            filter=filter_str,
+            select=retrievable_fields,
+            vector_filter_mode="preFilter",
+            top=new_top_n
+        )
+
+        results = list(results_iterable)
+        logger.info("Vector search returned %d results.", len(results))
+
+    except Exception as e:
+        logger.exception("Azure Search query failed: %s", e)
+        return []
+
+    # ---------------- CLEAN RESULTS ----------------
+    try:
+        clean_results = [
+            {
+                **{field: r.get(field) for field in retrievable_fields},
+                "score": f"{float(r.get('@search.score', 0)) * 100:.2f}"
+            }
+            for r in results
+        ]
+        logger.info("Cleaned results count: %d", len(clean_results))
+    except Exception as e:
+        logger.exception("Error cleaning search results: %s", e)
+        return []
+
+    # ---------------- UNIQUE FILTERING ----------------
+    try:
+        if only_unique == "yes":
+            seen = set()
+            unique_results = []
+            for r in sorted(clean_results, key=lambda x: x["score"], reverse=True):
+                val = r.get(unique_field)
+                if val not in seen and val is not None:
+                    seen.add(val)
+                    unique_results.append(r)
+            logger.info("Unique filtering applied. %d unique results.", len(unique_results))
+        else:
+            unique_results = sorted(clean_results, key=lambda x: x["score"], reverse=True)
+            logger.info("Unique filtering skipped. Total results: %d", len(unique_results))
+
+    except Exception as e:
+        logger.exception("Error applying unique filtering: %s", e)
+        return []
+
+    # ---------------- ARRANGEMENT LOGIC ----------------
+    try:
+        arrangement_field = config.get("arrangement_field")
+        is_dt = str(config.get("is_arrangement_field_is_datetime_field", "no")).lower()
+
+        if arrangement_field:
+            logger.info(
+                "Applying arrangement on field '%s' (is_datetime=%s)",
+                arrangement_field, is_dt
+            )
+
+            # ---------------- CASE 1: DATETIME FIELD ----------------
+            if is_dt == "yes":
+
+                primary = arrangement_field
+
+                # Parse date
+                for r in unique_results:
+                    r["_parsed_date"] = parse_date_safe(r.get(primary))
+
+                # Sort:
+                # 1) Valid dates first
+                # 2) New → Old
+                # 3) If same date → score descending
+                unique_results = sorted(
+                    unique_results,
+                    key=lambda x: (
+                        x["_parsed_date"] is not None,
+                        x["_parsed_date"],
+                        x["score"]
+                    ),
+                    reverse=True
+                )
+
+                logger.info("Datetime arrangement applied successfully.")
+
+                # Clean helper
+                for r in unique_results:
+                    r.pop("_parsed_date", None)
+
+                return unique_results[:top_n]
+
+            # ---------------- CASE 2: NON-DATETIME FIELD ----------------
+            else:
+                secondary = arrangement_field
+
+                logger.info("Non-datetime arrangement using frequency logic on '%s'.", secondary)
+
+                # Build frequency map
+                freq_map = {}
+                for r in unique_results:
+                    key = r.get(secondary)
+                    freq_map[key] = freq_map.get(key, 0) + 1
+
+                # Sort keys by frequency desc
+                sorted_groups = sorted(freq_map.items(), key=lambda x: x[1], reverse=True)
+
+                final_arranged = []
+                for key, _ in sorted_groups:
+                    group_items = [r for r in unique_results if r.get(secondary) == key]
+                    group_items = sorted(group_items, key=lambda x: x["score"], reverse=True)
+                    final_arranged.extend(group_items)
+
+                unique_results = final_arranged
+
+    except Exception as e:
+        logger.exception("Error in arrangement logic: %s", e)
+
+        # Cleanup helper values
+        for r in unique_results:
+            r.pop("_parsed_date", None)
+
+    except Exception as e:
+        logger.exception("Error in arrangement logic: %s", e)
+
+    return unique_results[:top_n]
+
+
+# ------------------- MAIN WRAPPER -------------------
+
+def add_historical_data_main(input_data, config):
+    logger.info("Starting historical data enrichment...")
+    is_valid, error = validate_config(config, input_data)
+
+    if not is_valid:
+        logger.error("Config validation failed: %s", error)
+        return {"status": "failed", "message": error}
+
+    logger.info("Config validation successful.")
+
+    try:
+        start_time=time.time()
+        # Setup Azure clients
+        logger.info("Initializing Azure clients...")
+
+        api_key = os.getenv("AZURE_OPENAI_API_KEY_embd")
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT_embd")
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION_embd")
+        endpoint = os.getenv("endpoint")
+        admin_key = os.getenv("admin_key")
+
+        client = AzureOpenAI(api_key=api_key, azure_endpoint=azure_endpoint, api_version=api_version)
+        # ############################### For local ###############################################
+        # from azure.core.pipeline.transport import RequestsTransport
+        # transport = RequestsTransport(connection_verify=False)
+        # index_name=config.get("AzureAIConfig").get("index_name")
+        # search_client = SearchClient(endpoint=endpoint, index_name=index_name, credential=AzureKeyCredential(admin_key),transport=transport)
+        # #########################################################################################
+        index_name=config.get("AzureAIConfig").get("index_name")
+        search_client = SearchClient(
+            endpoint=endpoint,
+            index_name=config["AzureAIConfig"]["index_name"],
+            credential=AzureKeyCredential(admin_key)
+        )
+
+        invoice_line_key = config["line_detail_identifier_in_input"]
+        master_key = config["master_data_identifier_in_input"]
+        filter_field_in_md = config.get("field_to_extract_from_master_data")
+
+        logger.info("Processing %d invoice lines...", len(input_data[invoice_line_key]))
+
+        for line in input_data[invoice_line_key]:
+
+            try:
+                query = {}
+
+                # Header filters
+                for f in config["apply_filter_on_this_fields"].get("header", []):
+                    query[f] = input_data.get(f)
+
+                # Line filters
+                for f in config["apply_filter_on_this_fields"].get("line_detail", []):
+                    query[f] = line.get(f)
+
+                # Master data filters
+                tax_codes = [
+                    md.get(filter_field_in_md)
+                    for md in line.get(master_key, [])
+                    if md.get(filter_field_in_md)
+                ]
+                query[filter_field_in_md] = list(set(tax_codes))
+                print("QUERY: ",query)
+                logger.info("Built query for line: %s", query)
+
+                # Run search
+                results = run_search_for_query(client, search_client, config, query)
+
+                line["historicalData"] = results
+                logger.info("Attached %d historical items.", len(results))
+
+            except Exception as e:
+                logger.exception("Error processing invoice line: %s", e)
+                line["historicalData"] = []
+
+        logger.info("Historical data processing completed successfully.")
+        # ##########################################################################
+        # os.makedirs("output_logs", exist_ok=True)
+
+        # # File path
+        # output_file_path = os.path.join("output_logs", "historical_output.json")
+
+        # # Dump JSON to file with double quotes
+        # with open(output_file_path, "w", encoding="utf-8") as f:
+        #     json.dump(input_data, f, indent=4, ensure_ascii=False)
+        # ##########################################################################
+        end_time=time.time()
+        logger.info(f"Total time taken to add historical data: {end_time-start_time}")
+        print(f"Total time taken to add historical data: {end_time-start_time}")
+        return {
+            "status": "success",
+            "data": input_data
+        }
+
+    except Exception as e:
+        logger.exception("Error while adding historical data: %s", e)
+        return {
+            "status": "error",
+            "message": f"Error while adding historical data: {e}"
+        }
