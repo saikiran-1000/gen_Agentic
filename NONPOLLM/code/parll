@@ -1,0 +1,157 @@
+import os
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from gl_categories_identification.gl_categories_main import gl_categories_main as process_single_invoice
+
+logger = logging.getLogger(__name__)
+
+
+def invline_to_inv(invoice_data, line_detail):
+    """
+    Split invoice into multiple invoices (one per line item).
+
+    Args:
+        invoice_data (dict): Full invoice data.
+        line_detail (str): Key representing the list of line items.
+
+    Returns:
+        list: List of new invoices, each with exactly one line item.
+    """
+    try:
+        line_items = invoice_data.get(line_detail, [])
+        if not isinstance(line_items, list):
+            raise ValueError(f"'{line_detail}' must be a list")
+
+        invoices = []
+        for line in line_items:
+            new_invoice = {k: v for k, v in invoice_data.items() if k != line_detail}
+            new_invoice[line_detail] = [line]
+            invoices.append(new_invoice)
+
+        logger.info(f"Split into {len(invoices)} individual invoices.")
+        return invoices
+
+    except Exception as e:
+        logger.exception(f"Error splitting invoice: {e}")
+        raise
+
+
+def process_invoices_in_parallel(invoices, line_detail, batch_size, config):
+    """
+    Process multiple invoices concurrently using ThreadPoolExecutor.
+
+    Args:
+        invoices (list): List of invoices.
+        line_detail (str): Key of the line item list.
+        batch_size (int): Max number of tasks to submit.
+        config (dict): Config for main().
+
+    Returns:
+        list: List of processed invoice objects.
+    """
+    results = []
+    cpu_count = os.cpu_count() or 4
+    max_workers = min(batch_size, cpu_count * 10)
+
+    logger.info(f"Starting parallel processing: {len(invoices)} invoices.")
+    logger.info(f"Using max_workers={max_workers}")
+
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_invoice = {
+                executor.submit(process_single_invoice, invoice, config): invoice
+                for invoice in invoices
+            }
+
+            for future in as_completed(future_to_invoice):
+                invoice = future_to_invoice[future]
+                try:
+                    response = future.result()
+                except Exception as e:
+                    logger.error(f"Invoice processing failed: {e}", exc_info=True)
+                    response = {"error": str(e)}
+
+                # Attach result to the line item
+                try:
+                    invoice[line_detail][0]["result"] = response
+                except Exception as attach_err:
+                    logger.error(f"Failed to attach result: {attach_err}")
+                    invoice.setdefault(line_detail, [{}])[0]["result"] = response
+
+                results.append(invoice)
+
+        logger.info("Parallel processing complete.")
+        return results
+
+    except Exception as e:
+        logger.exception(f"Error during parallel invoice processing: {e}")
+        raise
+
+
+def merge_invoices(split_invoices, line_detail):
+    """
+    Merge processed invoices back into a single invoice.
+
+    Args:
+        split_invoices (list): List of processed invoices.
+        line_detail (str): Line item key.
+
+    Returns:
+        dict: Final merged invoice.
+    """
+    try:
+        if not split_invoices:
+            logger.warning("No split invoices provided for merge.")
+            return {}
+
+        base_invoice = {k: v for k, v in split_invoices[0].items() if k != line_detail}
+
+        merged_lines = []
+        for inv in split_invoices:
+            if line_detail in inv:
+                merged_lines.extend(inv[line_detail])
+
+        base_invoice[line_detail] = merged_lines
+
+        logger.info(f"Merged {len(merged_lines)} line items back.")
+        return base_invoice
+
+    except Exception as e:
+        logger.exception(f"Error merging invoices: {e}")
+        raise
+
+
+def main_parallel(input_data, line_detail_identifier, batch_size, config):
+    """
+    Full pipeline:
+    1) Split invoice into per-line invoices
+    2) Process each in parallel
+    3) Merge results back
+
+    Args:
+        input_data (dict)
+        line_detail_identifier (str)
+        batch_size (int)
+        config (dict)
+
+    Returns:
+        dict: Final merged invoice with inference results
+    """
+    logger.info("Starting main parallel invoice pipeline.")
+
+    try:
+        split_invoices = invline_to_inv(input_data, line_detail_identifier)
+        processed = process_invoices_in_parallel(
+            split_invoices, line_detail_identifier, batch_size, config
+        )
+        final_result = merge_invoices(processed, line_detail_identifier)
+
+        logger.info(f"Parallel Pipeline complete. Returning final result")
+        return {"status": "success","status_code":200, "data": final_result}
+
+    except Exception as e:
+        logger.exception(f"Parallel Pipeline failed: {e}")
+        return {
+            "error": str(e),
+            "status": "Parallel pipeline failed."
+        }
