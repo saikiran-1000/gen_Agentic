@@ -1,0 +1,182 @@
+"""
+Pydantic Data Schemas for Tax Code Identification.
+This module defines the data schemas for the tax coding project using Pydantic. It ensures type safety, data integrity, and business logic compliance for the incoming invoice data. 
+"""
+
+from typing import Any, Dict, List, Union
+from pydantic import BaseModel, Field
+
+CONFIG: Dict[str, Any] = {}
+
+def get_pydantic_model(config: Dict[str, Any]) -> Any:
+    """Main Pydantic model for invoice data.
+
+    This function defines a series of nested Pydantic models for invoice data,
+    historical data, and tax master data. It uses field mappings from the
+    provided configuration dictionary to set up aliases for incoming data fields.
+
+    Args:
+        config (Dict[str, Any]): The configuration dictionary containing all
+                                 necessary field mappings.
+
+    Returns:
+        BaseModel: The top-level InvoiceData Pydantic model class, fully configured.
+    """
+    CONFIG.update(config)
+
+    class HistoricalData(BaseModel):
+        """Schema for historical line item data used for similarity comparison."""
+        invoiceLineID: str = Field(
+            ...,
+            description="Unique identifier for the historical invoice line item.",
+            alias=CONFIG.get("LLM_to_History_key_mapping", {}).get("invoiceLineID")
+        )
+        lineItemDescription: str = Field(
+            ...,
+            description="Descriptive name of the historical product/service.",
+            alias=CONFIG.get("LLM_to_History_key_mapping", {}).get("lineItemDescription")
+        )
+        invoiceDate: Union[str, List[str]] = Field(
+            ...,
+            description="Date(s) of the historical invoice. Can be a single date string or a list of aggregated dates.",
+            alias=CONFIG.get("LLM_to_History_key_mapping", {}).get("invoiceDate")
+        )
+        score: str = Field(
+            ...,
+            description="Similarity score between current and historical item.",
+            alias=CONFIG.get("LLM_to_History_key_mapping", {}).get("score")
+        )
+        
+        taxCode: str = Field(
+            ..., 
+            description="Tax Code for the particular historical data point.",
+            alias=CONFIG.get("LLM_to_History_key_mapping", {}).get("taxCode")
+            ) 
+
+
+    class TaxMasterData(BaseModel):
+        """Schema for tax master data associated with a line item."""
+        taxPercent: str = Field(
+            ...,
+            description="The tax percentage rate.",
+            alias=CONFIG.get("VAT_master_data_mapping", {}).get("taxPercent")
+        )
+        companyCountry: str = Field(
+            ...,
+            description="Country code from the tax master data.",
+            alias=CONFIG.get("VAT_master_data_mapping", {}).get("companyCountry")
+        )
+        taxCode: str = Field(
+            ...,
+            description="The specific tax code.",
+            alias=CONFIG.get("VAT_master_data_mapping", {}).get("taxCode")
+        )
+        taxCodeDescription: str = Field(
+            ...,
+            description="Description of the tax code.",
+            alias=CONFIG.get("VAT_master_data_mapping", {}).get("taxCodeDescription")
+        )
+
+    class InvoiceLineItem(BaseModel):
+        """Schema for individual line items within an invoice."""
+        invoiceLineID: str = Field(
+            ...,
+            description="Unique identifier for the invoice line item.",
+            alias=CONFIG.get("line_detail_mapping", {}).get("invoiceLineID")
+        )
+        lineItemDescription: str = Field(
+            ...,
+            description="Description of the product or service.",
+            alias=CONFIG.get("line_detail_mapping", {}).get("lineItemDescription")
+        )
+        taxPercent: str = Field(
+            ...,
+            description="Tax percentage applied to the line item.",
+            alias=CONFIG.get("line_detail_mapping", {}).get("taxPercent")
+        )
+        historicalData: List[HistoricalData] = Field(
+            default_factory=list,
+            description="List of similar historical transactions."
+        )
+        taxMasterDataLineItems: List[TaxMasterData] = Field(
+            default_factory=list,
+            description="List of relevant master data for tax."
+        )
+
+    class InvoiceData(BaseModel):
+        """Top-level schema for the complete invoice data structure."""
+        invoiceID: str = Field(
+            ...,
+            description="Unique identifier for the invoice.",
+            alias=CONFIG.get("header_mapping", {}).get("invoiceID")
+        )
+        companyCountry: str = Field(
+            ...,
+            description="Country of the company processing the invoice.",
+            alias=CONFIG.get("header_mapping", {}).get("companyCountry")
+        )
+        companyCode: str = Field(
+            ...,
+            description="Code of the company processing the invoice.",
+            alias=CONFIG.get("header_mapping", {}).get("companyCode")
+        )
+        vendorNumber: str = Field(
+            ...,
+            description="Identifier for the vendor.",
+            alias=CONFIG.get("header_mapping", {}).get("vendorNumber")
+        )
+        vendorCountry: str = Field(
+            ...,
+            description="Country of the vendor.",
+            alias=CONFIG.get("header_mapping", {}).get("vendorCountry")
+        )
+        invoiceDate: str = Field(
+            ...,
+            description="Date the invoice was issued."
+        )
+        invoiceLineItems: List[InvoiceLineItem] = Field(
+            ...,
+            min_items=1,
+            description="List of all line items in the invoice.",
+            alias=CONFIG.get("invoiceLineItems")
+        )
+
+    return InvoiceData
+
+
+class TaxCodingResultItem(BaseModel):
+    """
+    Schema for the tax coding result of a single invoice.
+    
+    This model validates each object within the 'invoiceLineItemsResults' list.
+    
+    Attributes:
+        invoiceLineID (str): The unique identifier for the invoice line item,
+                             used to map the result back to the original data.
+        taxCodeRecommendation (str): The AI-recommended tax code. Can also contain
+                                     a "No recommendation" message.
+        justification (str): The detailed reasoning behind the tax code recommendation
+                             or the reason for not providing one.
+    """
+    invoiceLineID: str = Field(..., description="The unique identifier for the invoice line item.")
+    taxCodeRecommendation: str = Field(..., description="The AI-recommended tax code or a status message.")
+    justification: str = Field(..., description="The reasoning behind the recommendation.")
+
+
+class FinalTaxCodingOutput(BaseModel):
+    """
+    Top-level schema for the complete tax coding analysis output for an invoice.
+    
+    This is the main model used to validate the entire final JSON object.
+    
+    Attributes:
+        invoiceID (str): The unique identifier for the parent invoice.
+        invoiceLineItemsResults (List[TaxCodingResultItem]): A list of tax coding results,
+                                                             with each item validated against
+                                                             the TaxCodingResultItem schema.
+    """
+    invoiceID: str = Field(..., description="The unique identifier for the parent invoice.")
+    invoiceLineItemsResults: List[TaxCodingResultItem] = Field(
+        ...,
+        description="A list of tax coding results for each processed line item."
+    )
