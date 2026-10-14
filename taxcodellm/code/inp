@@ -1,0 +1,51 @@
+"""Input Validation Module for Tax Coding Project.
+
+This module provides the core logic for validating incoming invoice data against the Pydantic models. It ensures that the input data conforms to the expected schema before any processing occurs.
+"""
+
+import logging
+from typing import Any, Dict
+from pydantic import ValidationError
+from data_models import get_pydantic_model
+
+def input_validation(input_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and structure invoice data using Pydantic models.
+
+    This function serves as the main entry point for validating raw invoice data.
+    It uses the provided Pydantic models to validate the input data against those models.
+
+    Args:
+        input_data (Dict[str, Any]): The raw invoice data received in dictionary format.
+        config (Dict[str, Any]): The configuration dictionary containing field
+                                 mappings for model creation.
+
+    Returns:
+        Dict[str, Any]: A dictionary containing the validated and structured invoice
+                        data, with field names matching the Pydantic model
+                        definitions (not the aliases).
+
+    Raises:
+        ValueError: If the input data fails validation against the Pydantic schema.
+    """
+    logging.info("Starting input data validation...")
+
+    try:
+        InvoiceDataModel = get_pydantic_model(config)
+        validated_model = InvoiceDataModel(**input_data)
+
+        validated_dict = validated_model.model_dump(by_alias=False)
+        invoice_id = validated_dict.get('invoiceID', 'Unknown')
+        logging.info(f"Input data validation successful for Invoice ID: {invoice_id}")
+        
+        return validated_dict
+
+    except ValidationError as e:
+        error_details = e.errors()
+        error_message = f"##TAX-CODING-ERROR## Input data validation failed: {error_details}"
+        logging.error(error_message)
+        raise ValueError(error_message) from e
+
+    except Exception as e:
+        error_message = f"##TAX-CODING-ERROR## Unexpected error during input validation: {str(e)}"
+        logging.error(error_message)
+        raise ValueError(error_message) from e
