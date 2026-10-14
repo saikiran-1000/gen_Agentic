@@ -1,0 +1,211 @@
+import io
+import pandas as pd
+import pickle
+import logging
+from io import BytesIO
+from azure.core.exceptions import ResourceNotFoundError
+import logging
+logger = logging.getLogger(__name__)
+def safe_split(val):
+    if isinstance(val, str) and '__' in val:
+        parts = val.split('__')
+        if len(parts) == 2:
+            return parts
+    return ['None', 'None']
+def validate_and_prepare_dataframe(df, x_field):
+    logging.info('Python HTTP trigger function in Inference.')
+    if not x_field:
+        raise ValueError("x_field must be a non-empty list.")
+
+    required_columns = x_field
+    missing_columns = set(required_columns) - set(df.columns)
+    if missing_columns:
+        raise ValueError(f"The following required columns are missing in the Data: {missing_columns}")
+    
+    df = df[list(required_columns)].copy()
+
+    missing_value_cols = df[required_columns].columns[df[required_columns].isnull().any()]
+    if not missing_value_cols.empty:
+        raise ValueError(f"The following columns contain missing values: {list(missing_value_cols)}")
+
+    df = df.reset_index(drop=True)
+    df['index'] = df.index
+    logging.info("Testing data validation done.")
+    return df
+
+def process_inference(blob_service_client,train_container_name,
+    df: pd.DataFrame,
+    model_path: str,
+    label_encoder_path: str,
+    scope1_path: str,
+    scope2_path: str,
+    x_field: list,
+    y_field: list,
+    best_combo: list,
+    to_drop: list,non_numeric_x_field , non_numeric_y_field
+):
+    logging.info("Inferencing started..")
+    for col in y_field:
+        if col in df.columns:
+            df.drop(columns=[col], inplace=True, errors='ignore')
+
+    # Validate and prepare DataFrame
+    updated_df = validate_and_prepare_dataframe(df, x_field)
+    ##################################################### BLOB STORAGE ###################################################
+    blob_client = blob_service_client.get_blob_client(container=train_container_name, blob=label_encoder_path)
+
+    try:
+        # Download blob content into memory
+        download_stream = blob_client.download_blob()
+        label_encoders_bytes = download_stream.readall()
+        label_encoders = pickle.loads(label_encoders_bytes)
+        logging.info("Label encoder loaded successfully.")
+
+    except ResourceNotFoundError:
+        raise FileNotFoundError(f"Blob '{label_encoder_path}' does not exist in container '{train_container_name}'.")
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to load the label_encoder from {train_container_name} due to: {str(e)}")
+    #######################################################################################################################
+    blob_client = blob_service_client.get_blob_client(container=train_container_name, blob=scope1_path)
+
+    try:
+        download_stream = blob_client.download_blob()
+        csv_content = download_stream.readall()
+
+        try:
+            scope1 = pd.read_csv(io.BytesIO(csv_content))
+        except pd.errors.EmptyDataError:
+            logging.info("CSV exists but is empty. Creating an empty DataFrame.")
+            scope1 = pd.DataFrame()
+
+    except ResourceNotFoundError:
+        raise FileNotFoundError(f"Blob '{scope1_path}' does not exist in container '{train_container_name}'.")
+
+    ######################################################################################################################
+    if len(scope1)!=0:
+        for col in non_numeric_x_field + non_numeric_y_field:
+            if col in scope1.columns:
+                scope1[col] = scope1[col].apply(lambda x: str(int(x)) if isinstance(x, float) and x.is_integer() else str(x))
+
+    # First check scope1 data is empty or not
+    if not scope1.empty:
+        match_cols = [col for col in scope1.columns if col != 'gl__cc']
+        scope1['merged'] = scope1[match_cols].astype(str).agg('__'.join, axis=1)
+        updated_df['merged'] = updated_df[list(best_combo)].astype(str).agg('__'.join, axis=1)
+        # Map gl__cc from scope1
+        merged_to_glcc = dict(zip(scope1['merged'], scope1['gl__cc']))
+        updated_scope1 = updated_df[updated_df['merged'].isin(merged_to_glcc)].copy()
+        updated_scope1['gl__cc'] = updated_scope1['merged'].map(merged_to_glcc)
+        updated_scope1['confidence_score'] = 1
+        updated_scope1.drop(columns=["merged"], inplace=True, errors='ignore')
+        logging.info(f"GL/CC tagged for {updated_scope1.shape[0]} using scope1 data.")
+    else:
+        updated_scope1 = pd.DataFrame(columns=updated_df.columns.tolist() + ['gl__cc', 'confidence_score'])
+        logging.info("SCOPE1 is empty, no data covered.")
+
+    # Remaining rows
+    updated_scope2 = updated_df[~updated_df['index'].isin(updated_scope1['index'])].copy()
+    updated_scope2.drop(columns=["merged"], errors='ignore', inplace=True)
+    if len(updated_scope2)==0:
+        final_df = pd.concat([updated_scope1], ignore_index=True)
+        final_df = final_df.sort_values(by='index').reset_index(drop=True)
+        final_df['confidence_score']=1.0
+        final_df.drop(columns=["index"],inplace=True, errors='ignore')
+        return final_df
+    ##################################################### BLOB STORAGE ###################################################
+    blob_client = blob_service_client.get_blob_client(container=train_container_name, blob=scope2_path)
+
+    try:
+        download_stream = blob_client.download_blob()
+        csv_content = download_stream.readall()
+
+        try:
+            scope2 = pd.read_csv(io.BytesIO(csv_content))
+        except pd.errors.EmptyDataError:
+            logging.info("Scope2 data exists but is empty. Creating an empty DataFrame.")
+            scope2 = pd.DataFrame()
+
+    except ResourceNotFoundError:
+        raise FileNotFoundError(f"Blob '{scope2_path}' does not exist in container '{train_container_name}'.")
+
+    ######################################################################################################################
+    if len(scope2)!=0:
+        for col in non_numeric_x_field + non_numeric_y_field:
+            if col in scope2.columns:
+                scope2[col] = scope2[col].apply(lambda x: str(int(x)) if isinstance(x, float) and x.is_integer() else str(x))
+
+    if not scope2.empty:
+        scope2_match_cols = [col for col in scope2.columns if col != 'gl__cc']
+        scope2['merged'] = scope2[scope2_match_cols].astype(str).agg('__'.join, axis=1)
+        updated_scope2['merged'] = updated_scope2[scope2_match_cols].astype(str).agg('__'.join, axis=1)
+        up_scope2 = updated_scope2[updated_scope2['merged'].isin(scope2['merged'])].copy()
+        up_exception = updated_scope2[~updated_scope2['merged'].isin(scope2['merged'])].copy()
+        up_exception.drop(columns=["merged"], inplace=True, errors='ignore')
+        up_scope2.drop(columns=["merged"], inplace=True, errors='ignore')
+    else:
+        updated_scope2['gl__cc'] = "None"
+        updated_scope2['confidence_score']=0
+        final_df = pd.concat([updated_scope1,updated_scope2], ignore_index=True)
+        final_df = final_df.sort_values(by='index').reset_index(drop=True)
+        final_df.drop(columns=["index"],inplace=True, errors='ignore')
+        # print(final_df.head(5))
+        return final_df
+
+    logging.info(f"{up_scope2.shape[0]} GL/CC tagged by model.")
+
+    if up_scope2.shape[0]!=0:
+        X_test = up_scope2.drop(columns=["index"]+to_drop, errors="ignore").copy()
+        
+        for col in X_test.columns:
+            if col in label_encoders:
+                X_test[col] = label_encoders[col].transform(X_test[col]).astype(float)
+
+        ##################################################### BLOB STORAGE ###################################################
+        blob_client = blob_service_client.get_blob_client(container=train_container_name, blob=model_path)
+
+        try:
+            # Download blob content into memory
+            download_stream = blob_client.download_blob()
+            model_bytes = download_stream.readall()
+            model = pickle.loads(model_bytes)
+            logging.info("Model loaded successfully.")
+
+        except ResourceNotFoundError:
+            raise FileNotFoundError(f"Blob '{model_path}' does not exist in container '{train_container_name}'.")
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to load the model due to: {str(e)}")
+        #######################################################################################################################
+        if len(X_test) == 0:
+            logging.info("Warning: X_test is empty. No predictions made.")
+            up_scope2 = up_scope2.copy()
+            up_scope2["gl__cc"] = []
+            up_scope2["confidence_score"] = []
+        else:
+            predictions = model.predict(X_test)
+            probabilities = model.predict_proba(X_test)
+            maxi_list = [round(float(prob.max()), 3) for prob in probabilities]
+            # encoder = label_encoders["GL Code"]
+            up_scope2 = up_scope2.copy()
+            up_scope2["gl__cc"] = predictions
+            up_scope2["confidence_score"] = maxi_list
+    else:
+        up_exception['gl__cc'] = "None"
+        up_exception['confidence_score']=0
+        final_df = pd.concat([updated_scope1,up_exception], ignore_index=True)
+        final_df = final_df.sort_values(by='index').reset_index(drop=True)
+        final_df.drop(columns=["index"],inplace=True, errors='ignore')
+        # print(final_df.head(5))
+        return final_df
+
+    # Final DataFrame
+    if "gl__cc" not in list(up_exception.columns):
+        up_exception["gl__cc"]="None"
+    up_exception['confidence_score']=0
+    final_df = pd.concat([updated_scope1, up_scope2, up_exception], ignore_index=True)
+    final_df = final_df.sort_values(by='index').reset_index(drop=True)
+    final_df.drop(columns=["index"],inplace=True, errors='ignore')
+    logging.info("Inferencing ends here.")
+    # print(final_df.head(5))
+    return final_df
