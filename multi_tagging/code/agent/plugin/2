@@ -1,0 +1,97 @@
+import logging
+from semantic_kernel.functions import kernel_function
+
+logger = logging.getLogger(__name__)
+
+
+class InputDataHandlerPlugin:
+    """
+    Handles parsing and validation of incoming LLM request data
+    for Invoice-PO matching pipeline before plugin processing.
+    """
+
+    def __init__(self, config=None):
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.config_from_json = config or {}
+
+        self.inv_desc_field = self.config_from_json.get("INV_DESC_FIELD", [])
+        self.inv_non_desc_fields = self.config_from_json.get("INV_NON_DESC_FIELDS", [])
+        self.inv_line_id_field = self.config_from_json.get("INV_LINE_ID_FIELD")
+
+        self.po_desc_field = self.config_from_json.get("PO_DESC_FIELD", [])
+        self.po_non_desc_fields = self.config_from_json.get("PO_NON_DESC_FIELDS", [])
+        self.po_line_id_field = self.config_from_json.get("PO_LINE_ID_FIELD")
+
+    @kernel_function(
+        name="validate_input_data",
+        description="Extracts and cleans invoice and PO line data from user prompt"
+    )
+    def validate_input_data(self, invoice_lines, po_lines):
+        """
+        Validates that all required fields are present in the invoice and PO lines.
+        Returns the cleaned data if validation passes.
+        """
+ 
+        try:
+            required_invoice_fields = (
+                self.inv_desc_field + self.inv_non_desc_fields + [self.inv_line_id_field]
+            )
+            required_po_fields = (
+                self.po_desc_field + self.po_non_desc_fields + [self.po_line_id_field]
+            )
+ 
+            # Check for missing fields in invoice lines
+            if not invoice_lines or not all(isinstance(line, dict) for line in invoice_lines):
+                raise ValueError("Invoice lines must be a list of json.")
+            if not po_lines or not all(isinstance(line, dict) for line in po_lines):
+                raise ValueError("PO lines must be a list of json.")
+            
+            inv_missing = [
+                field for field in [self.inv_line_id_field]
+                if not all(field in line for line in invoice_lines)
+            ]
+ 
+            po_missing = [
+                field for field in [self.po_line_id_field]
+                if not all(field in line for line in po_lines)
+            ]
+ 
+            # Raise error if any required field is missing
+            if inv_missing or po_missing:
+                raise ValueError(
+                    f"Missing required fields: "
+                    f"Invoice -> {inv_missing or 'None'}, PO -> {po_missing or 'None'}"
+                )
+            
+            cleaned_invoice_lines = []
+            for line in invoice_lines:
+                cleaned = {}
+                for field in required_invoice_fields:
+                    value = line.get(field, "NA")
+                    cleaned[field] = str(value) if value is not None else "NA"
+                cleaned_invoice_lines.append(cleaned)
+            # Clean and normalize PO lines
+            cleaned_po_lines = []
+            for line in po_lines:
+                cleaned = {}
+                for field in required_po_fields:
+                    value = line.get(field, "NA")
+                    cleaned[field] = str(value) if value is not None else "NA"
+                cleaned_po_lines.append(cleaned)
+            
+
+ 
+            self.logger.info("Input data successfully validated")
+            print("Input data successfully validated")
+            # print("Invoice line in input validation:", invoice_lines)
+            # print("PO line in input validation:", po_lines)
+            op= {
+                "invoice_df": cleaned_invoice_lines,
+                "po_df": cleaned_po_lines,
+            }
+            return op
+ 
+        except Exception as e:
+            self.logger.error(f"Failed to validate input data: {e}", exc_info=True)
+            raise ValueError(f"Failed to validate input data: {e}")
+        
