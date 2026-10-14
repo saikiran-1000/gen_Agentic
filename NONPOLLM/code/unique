@@ -1,0 +1,98 @@
+import os
+import logging
+from recent_gl_categories import main_gl_master
+from azure.search.documents import SearchClient # requirment.txt
+from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import HttpResponseError
+
+logger = logging.getLogger(__name__)
+
+def unique_GL_Categories_addition(input_data: dict, config: dict) -> dict:
+    """
+    Fetch unique GL Descriptions (categories) for a given vendorID from Azure AI Search,
+    and append them to the input data under `masterGLCategories`.
+
+    Args:
+        input_data (dict): Input record containing vendor ID and other data.
+        config (dict): Configuration mapping field names and index details.
+
+    Returns:
+        dict: Updated input_data wrapped inside a success or error response.
+    """
+    try:
+        # Extract config values
+        filter_by_vendorId = config.get('filter_by_vendorId', 'no')
+        if filter_by_vendorId == 'yes':
+            index_name = config.get("index_name")
+            azure_ai_search_column_mapping=config.get("azure_ai_search_column_mapping")
+            input_data_field_mapping=config.get("input_data_field_mapping")
+            vendor_field_index = azure_ai_search_column_mapping.get("vendorid")
+            vendor_field_input = input_data_field_mapping.get("vendorid")
+            gl_desc_field = azure_ai_search_column_mapping.get("gl_desc")
+
+            # Validate required config values
+            if not all([index_name, vendor_field_index, vendor_field_input, gl_desc_field]):
+                raise ValueError("Missing one or more required config fields.")
+
+            vendor_id = input_data.get(vendor_field_input)
+            if not vendor_id:
+                raise ValueError(f"Vendor ID not found in input_data under '{vendor_field_input}'")
+
+            ####################################################################################################################
+            # from dotenv import load_dotenv
+            # load_dotenv()
+            # endpoint = os.getenv("endpoint")
+            # admin_key = os.getenv("admin_key")
+            # from azure.core.pipeline.transport import RequestsTransport
+            # transport = RequestsTransport(connection_verify=False)
+            # search_client = SearchClient(endpoint=endpoint, index_name=index_name, credential=AzureKeyCredential(admin_key),transport=transport)
+            ####################################################################################################################
+            endpoint = os.getenv("endpoint")
+            admin_key = os.getenv("admin_key")
+            if not endpoint or not admin_key:
+                raise EnvironmentError("Azure Search credentials (endpoint/admin_key) are missing in environment variables.")
+            search_client = SearchClient(endpoint=endpoint, index_name=index_name, credential=AzureKeyCredential(admin_key))
+
+            # Filter and facet query
+            filter_str = f"{vendor_field_index} eq '{vendor_id}'"
+            logger.info(f"Fetching unique GL Descriptions for vendorID: {vendor_id}")
+
+            results = search_client.search(
+                search_text="*",
+                filter=filter_str,
+                facets=[f"{gl_desc_field},count:1000"],
+                top=0
+            )
+
+            # Extract unique GL Descriptions
+            facets = results.get_facets()
+            if not facets or gl_desc_field not in facets:
+                logger.warning(f"No GL Descriptions found for vendorID: {vendor_id}")
+                unique_gls = []
+            else:
+                unique_gls = [f["value"] for f in facets[gl_desc_field]]
+
+            # Prepare final data
+            input_data["masterGLCategories"] = [{"glCategory": val} for val in unique_gls]
+            logger.info(f"Added {len(unique_gls)} unique GL Descriptions for vendorID: {vendor_id}")
+        else:
+            input_data["masterGLCategories"] = []
+        try:
+            updated_input=main_gl_master(request=input_data,config=config)
+        except:
+            raise ValueError("Issue found while adding newly created GL Categories.")
+        return {"status": "success", "data": updated_input}
+
+    except HttpResponseError as http_err:
+        # logger.exception(f"Azure Search API error for vendorID: {input_data.get(vendor_field_input)}")
+        return {
+            "status": "error",
+            "message": f"Azure Search API call failed: {http_err}"
+        }
+
+    except Exception as e:
+        logger.exception("Error in adding GL Descriptions from Azure AI Search to input data.")
+        return {
+            "status": "error",
+            "message": f"Failed during GL Category addition: {e}"
+        }
