@@ -1,0 +1,115 @@
+"""  
+Invoice processing module for Non-PO Invoice Coding for GL Category Identification.  
+  
+This module contains functions for orchestrating the processing of invoice data, calling  
+the LLM for each line item, and validating the responses.  
+"""  
+  
+import copy  
+import json  
+import logging  
+from typing import Any, Dict  
+  
+# from gl_categories_llm_call import get_azure_openai_response  
+# from gl_categories_output_validation import llm_response_validation  
+
+from gl_categories_identification.gl_categories_llm_call import get_azure_openai_response
+from gl_categories_identification.gl_categories_output_validation import llm_response_validation
+
+logger = logging.getLogger(__name__)
+  
+def process_master_data(masterGLCategories: list) -> Dict[str, str]:  
+    """  
+    Processes master GL categories into a dictionary mapping GL category to its explanation.  
+  
+    Args:  
+        masterGLCategories (list): List of GL category dicts.  
+    Returns:  
+        Dict[str, str]: Mapping from GL category to explanation.  
+    """  
+    logger.info("Preprocessing GL Category for GL Category Identification.")
+    gl_dict = {item["glCategory"]: item["glCategoryExplanation"] for item in masterGLCategories}  
+    logger.info("Preprocessing completed GL Category for GL Category Identification.")
+    return gl_dict  
+  
+def process_invoice(upstream_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:  
+    """  
+    Processes the invoice data, calls the LLM for each line item, validates responses, and returns results.  
+  
+    Args:  
+        upstream_data (Dict[str, Any]): Upstream invoice data containing invoice and line items.  
+        config (Dict[str, Any]): Configuration with system and user prompts.  
+    Returns:  
+        Dict[str, Any]: Results containing validated GL categories for each invoice line item.  
+    Raises:  
+        ValueError: If LLM response or output validation fails.  
+    """  
+    logger.info("Starting invoice processing for GL Category Identification.")
+    invoice_response = {}  
+    invoice_items = upstream_data['invoiceLineItems']  
+    category_description_dict = process_master_data(upstream_data.get("masterGLCategories"))  
+    invoiceLineItemsResults = []  
+    for line in invoice_items:  
+        line_output = copy.deepcopy(line)  
+        lineDescription = line.get('lineDescription')  
+        line_id = line.get("invoiceLineID") 
+        system_prompt = config.get("gl_categories_system_prompt")  
+        user_prompt_template = config.get("gl_categories_user_prompt")  
+        if system_prompt is None or user_prompt_template is None:  
+            error_message = "##NON-PO-CODING-GL-CATEGORIES-IDENTIFICATION-ERROR## Missing system/user prompt in config."  
+            raise ValueError(error_message)  
+        user_prompt = user_prompt_template.format(  
+            lineDescription=lineDescription,  
+            GL_category_description=json.dumps(category_description_dict, indent=2)  
+        )  
+        logger.info(f"Calling LLM for invoice line for GL Category Identification: {line_id}")
+        try:
+            llm_response_content, _ = get_azure_openai_response(  
+            system_prompt=system_prompt,  
+            user_prompt=user_prompt,config=config )  
+
+        except KeyError as e:
+            error_message = f"##NON-PO-CODING-GL-CATEGORIES-IDENTIFICATION-ERROR## Missing configuration or prompt template key: {e}"
+            logger.error(f"Line item {line_id}: {error_message}", exc_info=True)
+            raise ValueError(error_message) from e
+        except (TypeError, AttributeError) as e:
+            error_message = f"##NON-PO-CODING-GL-CATEGORIES-IDENTIFICATION-ERROR## Prompt formatting error - invalid data type or attribute for Line Description Matching.: {e}"
+            logger.error(f"Line item {line_id}: {error_message}", exc_info=True)
+            raise ValueError(error_message) from e
+        except ValueError as e:
+            error_message = f"##NON-PO-CODING-GL-CATEGORIES-IDENTIFICATION-ERROR## LLM API error: {e}"
+            logger.error(f"Line item {line_id}: {error_message}", exc_info=True)
+            raise ValueError(error_message) from e
+        except Exception as e:
+            error_message = f"##NON-PO-CODING-GL-CATEGORIES-IDENTIFICATION-ERROR## Unexpected error in LLM call: {e}"
+            logger.error(f"Line item {line_id}: {error_message}", exc_info=True)
+            raise ValueError(error_message) from e
+        try:
+            logger.debug(f"Parsing and validating LLM response for line item {line_id} for GL Category Identification.")
+            formatted_response = json.loads(llm_response_content)
+            llm_response_validation(formatted_response)
+            match_result = formatted_response.get("match", "NA")
+            logger.debug(f"LLM response validated successfully for line item {line_id} for GL Category Identification")
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error for line item {line_id}: {e}", exc_info=True)
+            error_message = f"##NON-PO-CODING-GL-CATEGORIES-IDENTIFICATION-ERROR## LLM response JSON parsing error: {e}"
+            raise ValueError(error_message) from e
+        except ValueError as e:
+            logger.error(f"Validation error for line item {line_id}: {e}", exc_info=True)
+            error_message = f"##NON-PO-CODING-GL-CATEGORIES-IDENTIFICATION-ERROR## LLM line level response schema validation error: {e}"
+            raise ValueError(error_message) from e
+
+
+ 
+        line_output["glCategories"] = formatted_response.get("glCategories")  
+        invoiceLineItemsResults.append(line_output)  
+  
+    invoice_response['invoiceLineItemsResults'] = invoiceLineItemsResults  
+    invoice_response['invoiceLineItems'] = invoiceLineItemsResults  
+    invoice_response['invoiceID'] = upstream_data.get('invoiceID')  
+    invoice_response['invoiceDate'] = upstream_data.get('invoiceDate')  
+    invoice_response['approverName'] = upstream_data.get('approverName')  
+    invoice_response['vendorID'] = upstream_data.get('vendorID')  
+    logger.info("Invoice processing completed for GL Category Identification.")
+    return invoice_response  
