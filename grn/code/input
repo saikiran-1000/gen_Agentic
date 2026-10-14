@@ -1,0 +1,172 @@
+"""Input Validation Module for Invoice GRN Variance Analysis.
+
+This module provides comprehensive input validation for invoice Goods Receipt Note (GRN)  variance analysis using Pydantic models. It defines data schemas and validation rules to ensure data integrity, type safety, and business logic compliance before processing.
+"""
+
+import logging
+from typing import Any, Dict, List, Type
+
+from pydantic import BaseModel, Field, ValidationError
+
+logger = logging.getLogger(__name__)
+
+def pydantic_classes(config: Dict[str, Any]) -> Type[BaseModel]:
+    """Dynamically create Pydantic classes based on provided configuration.
+
+    This function defines Pydantic models for invoice and historical data
+    using field mappings specified in the configuration dictionary.
+
+    Args:
+        config (Dict[str, Any]): Configuration dictionary containing field mappings:
+            - LLM_to_salesforce_key_mapping: Field name mappings for invoice data
+            - LLM_to_History_key_mapping: Field name mappings for historical data
+
+    Returns:
+        Type[BaseModel]: The InvoiceData Pydantic model class.
+    """
+    logger.info("Creating Pydantic model classes from configuration")
+    
+    # Extract mappings from config
+    salesforce_mapping = config.get("LLM_to_salesforce_key_mapping", {})
+    history_mapping = config.get("LLM_to_History_key_mapping", {})
+    
+    logger.info(f"Salesforce mapping keys: {list(salesforce_mapping.keys())}")
+    logger.info(f"History mapping keys: {list(history_mapping.keys())}")
+
+    class HistoricalData(BaseModel):
+        """Schema for historical invoice and GRN transaction records.
+        Represents a single historical transaction record containing invoice and GRN quantities for the same material, used for variance analysis and trend detection.
+
+        Attributes:
+            invoiceDate (str): Date when the historical invoice was posted (ISO format expected)
+            invoiceQuantity (float): Quantity specified in the historical invoice (must be > 0)
+            grnQuantity (float): Quantity recorded in the historical GRN (must be >= 0)
+            uom (str): Unit of measure for both quantities (e.g., 'KG', 'PCS', 'LTR')
+        """
+        invoiceDate: str = Field(..., description="Date of the invoice posted", alias=history_mapping.get("invoiceDate"))
+        invoiceQuantity: float = Field(..., gt=0, description="Quantity specified in the invoice", alias=history_mapping.get("invoiceQuantity"))
+        grnQuantity: float = Field(..., ge=0, description="Quantity recorded in the GRN", alias=history_mapping.get("grnQuantity"))
+        uom: str = Field(..., description="Unit of Measure for the quantities", alias=history_mapping.get("uom"))
+
+
+    class InvoiceLineItems(BaseModel):
+        """Schema for individual invoice line items with historical context.
+
+        Represents a single line item in an invoice, including current quantities
+        and historical data used for AI-powered variance analysis.
+
+        Attributes:
+            invoiceLineID (str): Unique identifier for the invoice line item
+            materialDescription (str): Human-readable description of the material/product
+            materialID (str): Unique system identifier for the material
+            invoiceQuantity (float): Current invoice quantity for this line item
+            grnQuantity (float): Current GRN quantity for this line item  
+            uom (str): Unit of measure for quantities (must match historical data)
+            historicalData (List[HistoricalData]): List of historical transactions for analysis
+        """
+        invoiceLineID: str = Field(..., description="Unique identifier for the invoice line item", alias=salesforce_mapping.get("invoiceLineID"))
+        materialDescription: str = Field(..., description="Descriptive name of the material", alias=salesforce_mapping.get("materialDescription"))
+        materialID: str = Field(..., description="Unique identifier for the material", alias=salesforce_mapping.get("materialID"))
+        invoiceQuantity: float = Field(..., description="Quantity specified in the invoice", alias=salesforce_mapping.get("invoiceQuantity"))
+        grnQuantity: float = Field(..., description="Quantity recorded in the GRN", alias=salesforce_mapping.get("grnQuantity"))
+        uom: str = Field(..., description="Unit of Measure for the quantities", alias=salesforce_mapping.get("uom"))
+        historicalData: List[HistoricalData] = Field(
+            ...,
+            description="Historical data for the invoice line item",
+            default_factory=list
+        )
+
+
+    class InvoiceData(BaseModel):
+        """Main schema for complete invoice data structure.
+
+        Represents the complete invoice document with metadata and all line items.
+        This is the top-level schema used for validating incoming requests.
+
+        Attributes:
+            invoiceID (str): Unique identifier for the invoice document
+            invoiceDate (str): Date when the invoice was issued (ISO format expected)
+            country (str): Country code where the invoice was issued (e.g., 'US', 'AR')
+            vendorID (str): Unique identifier for the vendor/supplier
+            invoiceLineItems (List[InvoiceLineItems]): List of line items (minimum 1 required)
+        """
+        invoiceID: str = Field(..., description="Unique identifier for the invoice", alias=salesforce_mapping.get("invoiceID"))
+        invoiceDate: str = Field(..., description="Date of the invoice", alias=salesforce_mapping.get("invoiceDate"))
+        country: str = Field(..., description="Country where the invoice was issued", alias=salesforce_mapping.get("country"))
+        vendorID: str = Field(..., description="Unique identifier for the vendor", alias=salesforce_mapping.get("vendorID"))
+        invoiceLineItems: List[InvoiceLineItems] = Field(
+            ...,
+            min_items=1,
+            description="List of line items in the invoice",
+            alias=salesforce_mapping.get("invoiceLineItems"),
+        )
+    
+    logger.info("Pydantic model classes created successfully")
+    return InvoiceData
+
+
+def input_validation(invoice_grn_details: Dict[str, Any], config: Dict) -> Dict[str, Any]:
+    """Validate and process invoice GRN data using Pydantic schemas.
+
+    This function serves as the main entry point for input validation. It takes raw invoice data and applies comprehensive validation rules.
+
+    Args:
+        invoice_grn_details (Dict[str, Any]): Raw invoice data containing:
+            - invoiceID: Unique invoice identifier
+            - invoiceDate: Invoice date string
+            - country: Country code
+            - vendorID: Vendor identifier
+            - invoiceLineItems: List of line items with quantities and historical data
+        config (Dict): Configuration dictionary with field mappings for dynamic model creation.
+
+    Returns:
+        Dict[str, Any]: Validated and structured invoice data ready for processing.
+    """
+    logging.info("Starting input validation for invoice GRN data")
+    
+    try:
+        # Log incoming data summary
+        invoice_id = invoice_grn_details.get("invoiceID") or invoice_grn_details.get(config.get("LLM_to_salesforce_key_mapping", {}).get("invoiceID"))
+        line_items_key = config.get("LLM_to_salesforce_key_mapping", {}).get("invoiceLineItems", "invoiceLineItems")
+        num_line_items = len(invoice_grn_details.get(line_items_key, invoice_grn_details.get("invoiceLineItems", [])))
+        
+        logger.info(f"Validating invoice ID: {invoice_id}, Line items count: {num_line_items}")
+        
+        # Validate and parse the data using Pydantic model
+        logger.info("Creating Pydantic model from configuration")
+        InvoiceData = pydantic_classes(config)
+
+        logger.info("Validating invoice data against schema")
+        validated_model = InvoiceData(**invoice_grn_details)
+
+        logger.info(f"Invoice validation successful for invoice ID: {validated_model.invoiceID}")
+        logger.info(f"Validated {len(validated_model.invoiceLineItems)} line items")
+
+        # Convert to dictionary format for downstream processing
+        # Uses model_dump() to serialize with field names (not aliases)
+        result = validated_model.model_dump(by_alias=False)
+
+        logger.info("Input validation completed successfully")
+        return result
+
+    except ValidationError as validation_error:
+        logger.error(f"Validation error occurred: {validation_error}", exc_info=True)
+        logger.error(f"Failed validation for invoice ID: {invoice_id if 'invoice_id' in locals() else 'Unknown'}")
+
+        # Log detailed validation errors
+        for error in validation_error.errors():
+            logger.error(f"Validation error - Field: {error.get('loc')}, "
+                        f"Type: {error.get('type')}, "
+                        f"Message: {error.get('msg')}")
+
+        error_message = (
+            f"##GRN-VARIANCE-ERROR## Input JSON Schema Validation Error: "
+            f"{validation_error}"
+        )
+        raise ValueError(error_message) from validation_error
+
+    except Exception as e:
+        logger.error(f"Unexpected error during input validation: {str(e)}", exc_info=True)
+        logger.error(f"Error type: {type(e).__name__}")
+        error_message = f"##GRN-VARIANCE-ERROR## Unexpected error during input validation: {e}"
+        raise ValueError(error_message) from e
