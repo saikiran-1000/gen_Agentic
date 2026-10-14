@@ -1,0 +1,392 @@
+
+import azure.functions as func
+import logging
+import json
+import os
+
+logger = logging.getLogger(__name__)
+from historical_data_addition import add_historical_data_main
+from parallel_call import main_parallel
+from confidence import confidence_score
+from auto_upload import main_data_upload
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+## add
+from azure.storage.blob import BlobServiceClient
+blob_connection_string = os.getenv('AzureWebJobsStorage')
+def get_blob_service_client(blob_connection_string):
+    # Initialize BlobServiceClient
+    blob_client = BlobServiceClient.from_connection_string(blob_connection_string)
+    logger.info(f"blob_service_client, {blob_client}")
+    return blob_client
+
+blob_service_client = get_blob_service_client(blob_connection_string)
+
+# ----------------------------------
+# FETCH (download config.json)
+# ----------------------------------
+def fetch_config(container_name, blob_name):
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(blob_name)
+
+        # Download blob content
+        download_stream = blob_client.download_blob()
+        config_data = download_stream.readall()
+
+        # Parse JSON string to dict
+        config_dict = json.loads(config_data)
+        logger.info(f"Fetched {blob_name} from {container_name}")
+        return config_dict
+    except Exception as e:
+        logger.error(f"Error fetching config: {e}")
+        return None
+
+def transform_invoice_data(input_data: dict, mapping1: dict):
+    """
+    Safely transform invoice data using mapping1.
+    
+    Returns:
+        (True, transformed_data) on success
+        (False, error_message) on failure
+    """
+
+    try:
+        # ---------------------------------------------------------
+        # Extract mapping sections
+        # ---------------------------------------------------------
+        header_map = mapping1.get("header", {})
+        line_map = mapping1.get("line_detail", {})
+        tax_map = mapping1.get("tax_master", {})
+
+        final_output = {}
+
+        # ---------------------------------------------------------
+        # Detect header → line items list
+        # ---------------------------------------------------------
+        line_items_source_key = None
+        line_items_target_key = None
+
+        for old_key, new_key in header_map.items():
+            if isinstance(input_data.get(old_key), list):
+                line_items_source_key = old_key
+                line_items_target_key = new_key
+                break
+
+        if not line_items_source_key:
+            msg = "No line-item list found in header mapping."
+            logger.error(msg)
+            return False, msg
+
+        # ---------------------------------------------------------
+        # Detect line-item → tax master list
+        # ---------------------------------------------------------
+        sample_line = (input_data.get(line_items_source_key) or [{}])[0]
+
+        tax_master_source_key = None
+        tax_master_target_key = None
+
+        for old_key, new_key in line_map.items():
+            if isinstance(sample_line.get(old_key), list):
+                tax_master_source_key = old_key
+                tax_master_target_key = new_key
+                break
+
+        if not tax_master_source_key:
+            msg = "No tax-master list found inside line-item structure."
+            logger.error(msg)
+            return False, msg
+
+        # ---------------------------------------------------------
+        # Build header-level output
+        # ---------------------------------------------------------
+        for old_key, new_key in header_map.items():
+            if old_key != line_items_source_key:
+                final_output[new_key] = input_data.get(old_key)
+
+        # ---------------------------------------------------------
+        # Transform line items
+        # ---------------------------------------------------------
+        transformed_lines = []
+
+        for line in input_data.get(line_items_source_key, []):
+            new_line = {}
+
+            # Line-level fields except nested tax list
+            for old_key, new_key in line_map.items():
+                if old_key != tax_master_source_key:
+                    new_line[new_key] = line.get(old_key)
+
+            # Transform tax master nested records
+            tax_list = []
+            for tax_entry in line.get(tax_master_source_key, []):
+                new_tax = {}
+
+                for old_key, new_key in tax_map.items():
+                    new_tax[new_key] = tax_entry.get(old_key)
+
+                tax_list.append(new_tax)
+
+            new_line[tax_master_target_key] = tax_list
+            transformed_lines.append(new_line)
+
+        # Add transformed line items to final output
+        final_output[line_items_target_key] = transformed_lines
+
+        logger.info("Invoice transformation completed successfully.")
+        return final_output
+
+    except Exception as e:
+        logger.exception(f"Unexpected error during invoice transformation: {e}")
+        return f"Exception occurred: {str(e)}"
+
+container = "taxcodeconfig"
+blob = "config.json"
+
+# Fetch / Download
+config = fetch_config(container, blob)
+
+@app.route(route="TaxCodeLLM")
+def TaxCodeLLM(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processed a request.')
+    if req.method != "POST":
+        return func.HttpResponse("Only POST method is supported.", status_code=405)
+
+    # ---- Parse request ----
+    try:
+        first_test_data = req.get_json()
+        logging.info(f"Data received for inferencing: {first_test_data}")
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 400, "message": "Invalid JSON format"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not first_test_data:
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 400, "message": "No data found for inferencing"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    logging.info(f"Loaded config: {config}")
+    try:
+        main_data_upload(config)
+    except:
+        logging.exception(f"Unexpected error during historical data upload to Azure AI Search: {e}")
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 500, "message": f"Unexpected error during historical data upload to Azure AI Search: {str(e)}"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+    # #############################################################################################################
+    # #############################################################################################################
+    # # Load CSV → append row → upload back to container
+
+    # import io
+    # from datetime import datetime
+    # import pandas as pd
+
+    # try:
+    #     container_name = "reqresponsecollection"
+    #     blob_name = "reqresdata.csv"
+
+    #     container_client = blob_service_client.get_container_client(container_name)
+
+    #     # Ensure container exists
+    #     try:
+    #         container_client.get_container_properties()
+    #         logging.info(f"Container '{container_name}' already exists.")
+    #     except Exception:
+    #         logging.info(f"Container '{container_name}' not found. Creating...")
+    #         blob_service_client.create_container(container_name)
+    #         logging.info("Container created successfully.")
+
+    #     # Blob client
+    #     csv_blob_client = container_client.get_blob_client(blob_name)
+
+    #     # ---------------------------------------------------------------
+    #     # Try loading existing CSV, if missing → create new DataFrame
+    #     # ---------------------------------------------------------------
+    #     try:
+    #         logging.info("Attempting to download existing CSV...")
+    #         existing_csv_bytes = csv_blob_client.download_blob().readall()
+    #         df_log = pd.read_csv(io.StringIO(existing_csv_bytes.decode("utf-8")))
+    #         logging.info("Existing CSV loaded successfully.")
+
+    #     except Exception:
+    #         logging.warning("CSV blob not found. Creating a new CSV structure.")
+    #         df_log = pd.DataFrame(columns=["request", "time", "response"])
+
+    #     # ---------------------------------------------------------------
+    #     # Append new row
+    #     # ---------------------------------------------------------------
+    #     new_row = {
+    #         "request": json.dumps(first_test_data),
+    #         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    #         "response": json.dumps({"response": "Hello world"})
+    #     }
+
+    #     df_log = pd.concat([df_log, pd.DataFrame([new_row])], ignore_index=True)
+
+    #     # ---------------------------------------------------------------
+    #     # Convert to CSV
+    #     # ---------------------------------------------------------------
+    #     csv_buffer = io.StringIO()
+    #     df_log.to_csv(csv_buffer, index=False)
+    #     csv_buffer.seek(0)
+
+    #     # ---------------------------------------------------------------
+    #     # Upload updated CSV
+    #     # ---------------------------------------------------------------
+    #     csv_blob_client.upload_blob(csv_buffer.getvalue(), overwrite=True)
+
+    #     # return func.HttpResponse(
+    #     #     json.dumps({"Response": "Data_uploaded"}),
+    #     #     status_code=200,
+    #     #     mimetype="application/json"
+    #     # )
+
+    # except Exception as e:
+    #     logging.exception("Unexpected error while writing CSV file")
+    #     return func.HttpResponse(
+    #         json.dumps({
+    #             "status": "error",
+    #             "status_code": 500,
+    #             "message": f"Issue in loading request in csv: {str(e)}"
+    #         }),
+    #         status_code=500,
+    #         mimetype="application/json"
+    #     )
+
+    # #############################################################################################################
+    # #############################################################################################################
+
+
+    mapping1=config.get("salesforce_to_icd_mapping")
+    ## call that function here on test_data and mapping1##
+    test_data=transform_invoice_data(first_test_data,mapping1)
+    # ---- Master Data Fetch ----
+    try:
+        result1=add_historical_data_main(input_data=test_data,config=config)
+
+        if not isinstance(result1, dict) or result1.get("status") != "success":
+            error_message = result1.get("message", "Unknown error") if isinstance(result1, dict) else "Invalid result"
+            logging.error(f"Historical data addition failed: {error_message}")
+            return func.HttpResponse(
+                json.dumps({"status": "error", "status_code": result1.get("status_code", 500) if isinstance(result1, dict) else 500, "message": error_message}),
+                status_code=result1.get("status_code", 500) if isinstance(result1, dict) else 500,
+                mimetype="application/json"
+            )
+        try:
+            result1_data = result1["data"]
+            result1_linedetail = result1_data.get(config.get("line_detail_identifier_in_input"))
+
+            result1_count = {}
+            idfield = config.get("AzureAIConfig").get("key_field")
+
+            for lines in result1_linedetail:
+                result1_count[lines.get(idfield)] = len(lines["historicalData"])
+
+            logging.info(f"Historical data successfully added to input_data with count: {result1_count}")
+
+        except Exception as e:
+            logging.exception(f"Error while counting historical data: {e}")
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "error",
+                    "status_code": 500,
+                    "message": f"Failed while counting historical data for each invoice line: {str(e)}"
+                }),
+                status_code=500,
+                mimetype="application/json"
+            )
+        # ---------------------------------------------------
+        ## Here You have to load the that csv file and I have to insert a row there and save it back to container
+        ## In request column, it will be test_data, and in time it will be present date follerwd by time like this 2025-11-18 12:42:07
+        ## and in response column , it will be result1["data"]
+        try:
+            line_detail_identifier=config.get("line_detail_identifier_in_input")
+            batch_size=config.get("batch_size_for_parellel_processing")
+            op=main_parallel(result1["data"], line_detail_identifier, batch_size, config)
+            if not isinstance(op, dict) or op.get("status") != "success":
+                error_message = op.get("message", "Unknown error") if isinstance(op, dict) else "Invalid result"
+                logging.error(f"Parallel call failed: {error_message}")
+                final_response = {
+                    "status": "error",
+                    "status_code": op.get("status_code", 500) if isinstance(op, dict) else 500,
+                    "message": f"Issue found in Parallel call execution: {error_message}"
+                }
+                return func.HttpResponse(json.dumps(final_response), status_code=final_response["status_code"], mimetype="application/json")
+            ires=[]
+            # iitems=[]
+            # res = {"op":op, "result1":result1_data}
+
+            # return func.HttpResponse(
+            #     # json.dumps(llm_result),
+            #     json.dumps(res),
+            #     status_code=200,
+            #     mimetype="application/json"
+            # )
+            temp_dict=op.get("data").get(line_detail_identifier)[0].get("result").get("data").copy()
+            for item in op.get("data").get(line_detail_identifier):
+                ires.extend(item.get("result").get("data").get("invoiceLineItemsResults"))
+                # iitems.extend(item.get("result").get("data").get("invoiceLineItems"))
+            temp_dict_keys=list(temp_dict.keys())
+            llm_result = {}
+            for key in temp_dict_keys:
+                if key=="invoiceLineItemsResults":
+                    llm_result[key]=ires
+                    continue
+                # if key=="invoiceLineItems":
+                #     llm_result[key]=iitems
+                #     continue
+                llm_result[key]=temp_dict[key]
+            logging.info("SQL query execution completed successfully.")
+            # res = {"final_output":llm_result, "result1":result1_data}
+
+            # return func.HttpResponse(
+            #     # json.dumps(llm_result),
+            #     json.dumps(res),
+            #     status_code=200,
+            #     mimetype="application/json"
+            # )
+        except Exception as e:
+            logging.exception(f"Error in LLM callout: {e}")
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "error",
+                    "status_code": 500,
+                    "message": f"Failed in LLM callout: {str(e)}"
+                }),
+                status_code=500,
+                mimetype="application/json"
+            )
+        try:
+            final_result = confidence_score(llm_result, result1_data, config)
+            # res = {"final_result": final_result, "final_output":llm_result, "result1":result1_data}
+            return func.HttpResponse(
+                json.dumps(final_result),
+                # json.dumps(res),
+                status_code=200,
+                mimetype="application/json"
+            )
+        except Exception as e:
+            logging.exception(f"Error in Confidence score calculation: {e}")
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "error",
+                    "status_code": 500,
+                    "message": f"Failed in Confidence score: {str(e)}"
+                }),
+                status_code=500,
+                mimetype="application/json"
+            )
+    except Exception as e:
+        logging.exception(f"Unexpected error during master data fetch: {e}")
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 500, "message": f"Issue in master data fetch: {str(e)}"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+    
