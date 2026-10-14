@@ -1,0 +1,772 @@
+import datetime
+import logging
+import math
+from typing import Dict, Any, List, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_date(value) -> datetime.date:
+    """Parse dates in 'YYYY-MM-DD' or 'YYYY-MM-DDT...' format."""
+    if value is None:
+        raise ValueError("Date value is None.")
+
+    if isinstance(value, datetime.date):
+        return value
+
+    if isinstance(value, str):
+        cleaned = value.split("T")[0]  # keep only 'YYYY-MM-DD'
+        try:
+            return datetime.datetime.strptime(cleaned, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError(f"Invalid date string '{value}'. Expected YYYY-MM-DD or YYYY-MM-DDT...")
+
+    raise ValueError(f"Unsupported date type: {type(value)}")
+
+
+def _update_freq_and_recency(group: Dict[str, Any],
+                             key: str,
+                             item_date: datetime.date,
+                             inv_date: datetime.date,
+                             recent_count: int,
+                             lambda_decay: float,
+                             score: float) -> None:
+    """Increment freq and update recency for the given key in group (in-place)."""
+    if key not in group:
+        group[key] = {"freq": 0, "recency": 0.0, "max_score": 0.0}
+    group[key]["freq"] = group[key].get("freq", 0) + 1
+    
+    # Track max score for this key
+    current_max_score = group[key].get("max_score", 0.0)
+    group[key]["max_score"] = max(current_max_score, score)
+    
+    # only consider recency for the first `recent_count` occurrences
+    if group[key]["freq"] <= recent_count:
+        no_of_days = (inv_date - item_date).days + 1
+        recency_add = 0.0
+        if no_of_days <= 0:
+            # avoid division by zero or negative days; treat as least recent
+            recency_add = 0.0
+        else:
+            recency_add = round(math.exp(-lambda_decay * no_of_days), 5)
+        group[key]["recency"] = group[key].get("recency", 0.0) + recency_add
+
+
+def _finalize_group(group: Dict[str, Dict[str, Any]],
+                    total_rows: int,
+                    how_many_recent_to_keep: int,
+                    cfg: Dict[str, Any],
+                    group_type:str) -> Dict[str, Dict[str, Any]]:
+    """
+    Calculate freq using exponential formula, sort by recency (desc), 
+    zero-out recency beyond cutoff, compute confidence score using new formula.
+    """
+    print("FIn group", group)
+    if not group or total_rows <= 0:
+        return {}
+
+    # Get k_f parameter for frequency calculation
+    k_f = float(cfg.get("k_f_coefficient_for_frequency_calculation", 0.03))
+    # weight_config=cfg.get("weightage_for_confidence_score_calculation")
+    logger.info(f"GROUPTYPE: {group_type}")
+    if group_type == "gl":
+        weight_config = cfg.get("weightage_for_confidence_score_calculation_gl", {})
+    elif group_type == "cc":
+        weight_config = cfg.get("weightage_for_confidence_score_calculation_cc", {})
+    else:
+        raise ValueError(f"Unknown group_type: {group_type}")
+    
+    logger.info(f"weight_config: {weight_config}")
+    
+    # Calculate frequency using: freq = 1 - e^(-k_f * gl_count)
+    for k, v in group.items():
+        gl_count = v.get("freq", 0)
+        v["freq"] = 1 - math.exp(-k_f * gl_count)
+
+        # 1 - math.exp(-k_f * 15) = 1
+
+    print("After freq update", group)
+    # Sort by recency descending and preserve as ordered dict
+    sorted_items = sorted(group.items(), key=lambda it: it[1].get("recency", 0.0), reverse=True)
+    ordered_group = {k: v for k, v in sorted_items}
+
+    # Zero out recency beyond how_many_recent_to_keep
+    for idx, (k, v) in enumerate(list(ordered_group.items()), start=1):
+        if idx > how_many_recent_to_keep:
+            v["recency"] = 0.0
+
+    # Compute confidence score using new formula
+    # confidence = 0.5 * max_score + 0.2 * freq + 0.3 * recency
+    for v in ordered_group.values():
+        max_score = v.get("max_score", 0.0)
+        freq = v.get("freq", 0.0)
+        recency = v.get("recency", 0.0)
+        v["score"] = weight_config.get("score") * max_score + weight_config.get("w_freq") * freq + weight_config.get("w_recency") * recency
+
+    print("Ordered Group", ordered_group)
+    # If multiple codes present, normalize confidence scores
+    if len(ordered_group) > 1:
+        # total_score = sum(v["score"] for v in ordered_group.values())
+        total_score = 0
+        for v in ordered_group.values():
+                total_score += v.get("score",0.0)
+        print(total_score)
+        # Avoid division by zero
+        if total_score <= 0:
+            for v in ordered_group.values():
+                v["confidence"] = 0.0
+        else:
+            for v in ordered_group.values():
+                v["confidence"] = v.get("score", 0.0) / total_score
+    else:
+        # If only one code, confidence = score
+        for v in ordered_group.values():
+            v["confidence"] = v.get("score", 0.0)
+    
+    return ordered_group
+
+
+def _pick_best(group: Dict[str, Dict[str, Any]]) -> Tuple[str, float]:
+    """
+    Return (best_key, confidence). If tie for top confidence or group empty -> return ("", 0.0)
+    """
+    best_key = ""
+    best_conf = -1.0
+    for k, v in group.items():
+        conf = float(v.get("confidence", 0.0))
+        if conf > best_conf:
+            best_conf = conf
+            best_key = k
+        elif conf == best_conf:
+            # tie -> ambiguous
+            return "NA", 0.0
+    if best_conf < 0:
+        return "NA", 0.0
+    return best_key, round(best_conf, 6)
+
+################################### CUSTOM PREDICT ######################################## 
+
+def main_gl_cc_predict(request: Dict[str, Any],
+                       input_data: Dict[str, List[Dict[str, Any]]],
+                       config: Dict[str, Any],
+                       predict_only: str = "both") -> Dict[str, Any]:
+    """
+    Production-ready pipeline to predict GL Code and Cost Centre per invoice line.
+    
+    Args:
+        predict_only: "both" (default), "gl_only", or "cc_only"
+                     Controls which predictions to perform
+
+    Returns:
+        {"status":"success","status_code":200,"data": final_response}
+    On failure:
+        {"status_code":400, "status":"error", "message": "..."}
+    """
+    try:
+        logger.info(f"Starting main_gl_cc_predict pipeline with predict_only={predict_only}")
+        # Validate config required keys
+        required_cfg_keys = [
+            "inv_line_detail_identifier",
+            "invoicedate_field_in_header",
+            "approverName_field_in_header",
+            "invoicedate_field_in_invl_in_database",
+            "GLCode_column_name_in_database",
+            "CostCentre_column_name_in_database",
+            "Approver_column_name_in_database",
+            "recency_weight",
+            "frequency_weight",
+            "lambda_decay",
+            "recent_count",
+            "how_many_recent_gl_to_consider",
+            "k_f_coefficient_for_frequency_calculation",
+            "weightage_for_confidence_score_calculation_gl",
+            "weightage_for_confidence_score_calculation_cc"
+        ]
+        for k in required_cfg_keys:
+            if k not in config:
+                raise KeyError(f"Missing required config key: '{k}'")
+
+        inv_line_field = config.get("inv_line_detail_identifier")
+        inv_date_header_field = config.get("invoicedate_field_in_header")
+        approver_header_field = config.get("approverName_field_in_header")
+        approver_database_name = config.get("Approver_column_name_in_database")
+        invl_date_field = config.get("invoicedate_field_in_invl_in_database")
+        glcol = config.get("GLCode_column_name_in_database")
+        cccol = config.get("CostCentre_column_name_in_database")
+        recent_count = int(config.get("recent_count", 1))
+        lambda_decay = float(config.get("lambda_decay", 0.01))
+        how_many_recent_to_consider = int(config.get("how_many_recent_gl_to_consider", 1))
+        
+        # Parse invoice-level date
+        inv_date_raw = request.get(inv_date_header_field)
+        inv_date = _parse_date(inv_date_raw)
+        
+        final_response: List[Dict[str, Any]] = []
+
+        invoice_lines = request.get(inv_line_field, [])
+        if not isinstance(invoice_lines, list):
+            raise ValueError(f"Expected '{inv_line_field}' to be a list in request.")
+
+        for invl in invoice_lines:
+            # Prepare data rows for this invoice line by expanding glCategories mapping from input_data
+            gl_categories = invl.get("glCategories", []) or []
+            data_rows: List[Dict[str, Any]] = []
+            for category in gl_categories:
+                rows = input_data.get(category, [])
+                if isinstance(rows, list):
+                    data_rows.extend(rows)
+
+            total_rows = len(data_rows)
+
+            # Build grouping structures
+            grouped_by_glcode: Dict[str, Dict[str, Any]] = {}
+            grouped_by_cc: Dict[str, Dict[str, Any]] = {}
+
+            # header approver to filter CC grouping
+            header_approver = request.get(approver_header_field)
+
+            # iterate rows and update groups
+            for row in data_rows:
+                try:
+                    item_date_raw = row.get(invl_date_field)
+                    item_date = _parse_date(item_date_raw)
+                except Exception:
+                    # skip rows with bad/missing date
+                    logger.debug("Skipping row with invalid/missing date: %s", row)
+                    continue
+
+                # Get score from row
+                score = float(row.get("score", 0.0))
+
+                # GL code grouping - only if predict_only is "both" or "gl_only"
+                if predict_only in ["both", "gl_only"]:
+                    item_gl = row.get(glcol)
+                    if item_gl:
+                        _update_freq_and_recency(grouped_by_glcode, item_gl, item_date, inv_date, recent_count, lambda_decay, score)
+
+                # Cost Centre grouping - only if predict_only is "both" or "cc_only"
+                if predict_only in ["both", "cc_only"]:
+                    row_approver = row.get(approver_database_name)
+                    if row_approver == header_approver:
+                        item_cc = row.get(cccol)
+                        if item_cc:
+                            _update_freq_and_recency(grouped_by_cc, item_cc, item_date, inv_date, recent_count, lambda_decay, score)
+
+            # Finalize groups (calculate freq, sort, cutoff recency, compute confidence)
+            grouped_by_glcode_final = {}
+            grouped_by_cc_final = {}
+            
+            if predict_only in ["both", "gl_only"]:
+                grouped_by_glcode_final = _finalize_group(grouped_by_glcode,
+                                                          total_rows,
+                                                          how_many_recent_to_consider,
+                                                          config,"gl")
+            
+            if predict_only in ["both", "cc_only"]:
+                grouped_by_cc_final = _finalize_group(grouped_by_cc,
+                                                      total_rows,
+                                                      how_many_recent_to_consider,
+                                                      config,"cc")
+
+            best_gl = "NA"
+            gl_conf = 0.0
+            if predict_only in ["both", "gl_only"]:
+                if grouped_by_glcode_final == {}:
+                    best_gl = "NA"
+                    gl_conf = 0.0
+                else:
+                    best_gl, gl_conf = _pick_best(grouped_by_glcode_final)
+                
+            best_cc = "NA"
+            cc_conf = 0.0
+            if predict_only in ["both", "cc_only"]:
+                if grouped_by_cc_final == {}:
+                    best_cc = "NA"
+                    cc_conf = 0.0
+                else:
+                    best_cc, cc_conf = _pick_best(grouped_by_cc_final)
+
+            # ensure non-negative confidences and convert to percentage
+            gl_conf = max(0.0, float(gl_conf)) * 100
+            cc_conf = max(0.0, float(cc_conf)) * 100
+
+            output_item = {
+                "Success": "True",
+                "ID": invl.get(config.get("field_name_for_invoice_line_id")),
+                "GL Code": {"field_value": str(best_gl), "confidence_score": round(gl_conf,2)},
+                "Cost Code": {"field_value": str(best_cc), "confidence_score": round(cc_conf,2)},
+            }
+            if (not best_gl or best_gl == "NA") and (not best_cc or best_cc == "NA") and predict_only=="both":
+                output_item["Success"] = "False"
+            final_response.append(output_item)
+            logger.info(
+                "Processed invoiceLineID=%s BestGL=%s(conf=%s) BestCC=%s(conf=%s)",
+                invl.get("invoiceLineID"), best_gl, gl_conf, best_cc, cc_conf
+            )
+
+        logger.info("main_gl_cc_predict completed successfully.")
+        return {"status": "success", "status_code": 200, "data": final_response}
+
+    except Exception as e:
+        logger.exception("Error in main_gl_cc_predict pipeline.")
+        return {
+            "status_code": 400,
+            "status": "error",
+            "message": f"Main pipeline failed: {e}"
+        }
+
+
+# def main_gl_cc_predict(request: Dict[str, Any],
+#                        input_data: Dict[str, List[Dict[str, Any]]],
+#                        config: Dict[str, Any]) -> Dict[str, Any]:
+#     """
+#     Production-ready pipeline to predict GL Code and Cost Centre per invoice line.
+
+#     Returns:
+#         {"status":"success","status_code":200,"data": final_response}
+#     On failure:
+#         {"status_code":400, "status":"error", "message": "..."}
+#     """
+#     try:
+#         logger.info("Starting main_gl_cc_predict pipeline.")
+
+#         # Validate config required keys
+#         required_cfg_keys = [
+#             "inv_line_detail_identifier",
+#             "invoicedate_field_in_header",
+#             "approverName_field_in_header",
+#             "invoicedate_field_in_invl_in_database",
+#             "GLCode_column_name_in_database",
+#             "CostCentre_column_name_in_database",
+#             "recency_weight",
+#             "frequency_weight",
+#             "lambda_decay",
+#             "recent_count",
+#             "how_many_recent_gl_to_consider",
+#             "k_f_coefficient_for_frequency_calculation",
+#             "weightage_for_confidence_score_calculation"
+#         ]
+#         for k in required_cfg_keys:
+#             if k not in config:
+#                 raise KeyError(f"Missing required config key: '{k}'")
+
+#         inv_line_field = config.get("inv_line_detail_identifier")
+#         inv_date_header_field = config.get("invoicedate_field_in_header")
+#         approver_header_field = config.get("approverName_field_in_header")
+#         approver_database_name = config.get("Approver_column_name_in_database")
+#         invl_date_field = config.get("invoicedate_field_in_invl_in_database")
+#         glcol = config.get("GLCode_column_name_in_database")
+#         cccol = config.get("CostCentre_column_name_in_database")
+#         recent_count = int(config.get("recent_count", 1))
+#         lambda_decay = float(config.get("lambda_decay", 0.01))
+#         how_many_recent_to_consider = int(config.get("how_many_recent_gl_to_consider", 1))
+        
+#         # Parse invoice-level date
+#         inv_date_raw = request.get(inv_date_header_field)
+#         inv_date = _parse_date(inv_date_raw)
+        
+#         final_response: List[Dict[str, Any]] = []
+
+#         invoice_lines = request.get(inv_line_field, [])
+#         if not isinstance(invoice_lines, list):
+#             raise ValueError(f"Expected '{inv_line_field}' to be a list in request.")
+
+#         for invl in invoice_lines:
+#             # Prepare data rows for this invoice line by expanding glCategories mapping from input_data
+#             gl_categories = invl.get("glCategories", []) or []
+#             data_rows: List[Dict[str, Any]] = []
+#             for category in gl_categories:
+#                 rows = input_data.get(category, [])
+#                 if isinstance(rows, list):
+#                     data_rows.extend(rows)
+
+#             total_rows = len(data_rows)
+
+#             # Build grouping structures
+#             grouped_by_glcode: Dict[str, Dict[str, Any]] = {}
+#             grouped_by_cc: Dict[str, Dict[str, Any]] = {}
+
+#             # header approver to filter CC grouping
+#             header_approver = request.get(approver_header_field)
+
+#             # iterate rows and update groups
+#             for row in data_rows:
+#                 try:
+#                     item_date_raw = row.get(invl_date_field)
+#                     item_date = _parse_date(item_date_raw)
+#                 except Exception:
+#                     # skip rows with bad/missing date
+#                     logger.debug("Skipping row with invalid/missing date: %s", row)
+#                     continue
+
+#                 # Get score from row
+#                 score = float(row.get("score", 0.0))
+
+#                 # GL code grouping
+#                 item_gl = row.get(glcol)
+#                 if item_gl:
+#                     _update_freq_and_recency(grouped_by_glcode, item_gl, item_date, inv_date, recent_count, lambda_decay, score)
+
+#                 # Cost Centre grouping only if approver matches header_approver
+#                 row_approver = row.get(approver_database_name)
+#                 if row_approver == header_approver:
+#                     item_cc = row.get(cccol)
+#                     if item_cc:
+#                         _update_freq_and_recency(grouped_by_cc, item_cc, item_date, inv_date, recent_count, lambda_decay, score)
+
+#             # Finalize groups (calculate freq, sort, cutoff recency, compute confidence)
+#             grouped_by_glcode_final = _finalize_group(grouped_by_glcode,
+#                                                       total_rows,
+#                                                       how_many_recent_to_consider,
+#                                                       config)
+#             grouped_by_cc_final = _finalize_group(grouped_by_cc,
+#                                                   total_rows,
+#                                                   how_many_recent_to_consider,
+#                                                   config)
+
+#             best_gl = "NA"
+#             gl_conf = 0.0
+#             if grouped_by_glcode_final == {}:
+#                 best_gl = "NA"
+#                 gl_conf = 0.0
+#             else:
+#                 best_gl, gl_conf = _pick_best(grouped_by_glcode_final)
+                
+#             best_cc = "NA"
+#             cc_conf = 0.0
+#             if grouped_by_cc_final == {}:
+#                 best_cc = "NA"
+#                 cc_conf = 0.0
+#             else:
+#                 best_cc, cc_conf = _pick_best(grouped_by_cc_final)
+
+#             # ensure non-negative confidences and convert to percentage
+#             gl_conf = max(0.0, float(gl_conf)) * 100
+#             cc_conf = max(0.0, float(cc_conf)) * 100
+
+#             output_item = {
+#                 "Success": "True",
+#                 "ID": invl.get(config.get("field_name_for_invoice_line_id")),
+#                 "GL Code": {"field_value": str(best_gl), "confidence_score": round(gl_conf,2)},
+#                 "Cost Code": {"field_value": str(best_cc), "confidence_score": round(cc_conf,2)},
+#             }
+#             if (not best_gl or best_gl == "NA") and (not best_cc or best_cc == "NA"):
+#                 output_item["Success"] = "False"
+#             final_response.append(output_item)
+#             logger.info(
+#                 "Processed invoiceLineID=%s BestGL=%s(conf=%s) BestCC=%s(conf=%s)",
+#                 invl.get("invoiceLineID"), best_gl, gl_conf, best_cc, cc_conf
+#             )
+
+#         logger.info("main_gl_cc_predict completed successfully.")
+#         return {"status": "success", "status_code": 200, "data": final_response}
+
+#     except Exception as e:
+#         logger.exception("Error in main_gl_cc_predict pipeline.")
+#         return {
+#             "status_code": 400,
+#             "status": "error",
+#             "message": f"Main pipeline failed: {e}"
+#         }
+
+
+
+
+
+
+
+
+######################### OLD CONFIDENCE SCORE LOGIC ##############################
+
+
+# import datetime
+# import logging
+# import math
+# from typing import Dict, Any, List, Tuple
+
+# logger = logging.getLogger(__name__)
+
+
+# # def _parse_date(value) -> datetime.date:
+# #     """Parse a date value that may already be a date or a YYYY-MM-DD string."""
+# #     if value is None:
+# #         raise ValueError("Date value is None.")
+# #     if isinstance(value, datetime.date):
+# #         return value
+# #     if isinstance(value, str):
+# #         try:
+# #             return datetime.datetime.strptime(value, "%Y-%m-%d").date()
+# #         except ValueError as e:
+# #             raise ValueError(f"Invalid date string '{value}'. Expected 'YYYY-MM-DD'.") from e
+# #     raise ValueError(f"Unsupported date type: {type(value)}")
+
+# def _parse_date(value) -> datetime.date:
+#     """Parse dates in 'YYYY-MM-DD' or 'YYYY-MM-DDT...' format."""
+#     if value is None:
+#         raise ValueError("Date value is None.")
+
+#     if isinstance(value, datetime.date):
+#         return value
+
+#     if isinstance(value, str):
+#         cleaned = value.split("T")[0]  # keep only 'YYYY-MM-DD'
+#         try:
+#             return datetime.datetime.strptime(cleaned, "%Y-%m-%d").date()
+#         except ValueError:
+#             raise ValueError(f"Invalid date string '{value}'. Expected YYYY-MM-DD or YYYY-MM-DDT...")
+
+#     raise ValueError(f"Unsupported date type: {type(value)}")
+
+# def _update_freq_and_recency(group: Dict[str, Any],
+#                              key: str,
+#                              item_date: datetime.date,
+#                              inv_date: datetime.date,
+#                              recent_count: int,
+#                              lambda_decay: float) -> None:
+#     """Increment freq and update recency for the given key in group (in-place)."""
+#     if key not in group:
+#         group[key] = {"freq": 0, "recency": 0.0}
+#     group[key]["freq"] = group[key].get("freq", 0) + 1
+#     # only consider recency for the first `recent_count` occurrences
+#     if group[key]["freq"] <= recent_count:
+#         no_of_days = (inv_date - item_date).days + 1
+#         recency_add=0.0
+#         if no_of_days <= 0:
+#             # avoid division by zero or negative days; treat as least recent
+#             recency_add = 0.0
+#         else:
+#             # recency_add = round(1 / no_of_days, 5)
+#             # recency_add=round()
+#             recency_add = round(math.exp(-lambda_decay * no_of_days),5)
+#         group[key]["recency"] = group[key].get("recency", 0.0) + recency_add
+
+
+# def _finalize_group(group: Dict[str, Dict[str, Any]],
+#                     total_rows: int,
+#                     how_many_recent_to_keep: int,
+#                     cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+#     """
+#     Normalize freq to fraction, sort by recency (desc), zero-out recency beyond cutoff,
+#     compute score and normalize to confidence.
+#     """
+#     if not group or total_rows <= 0:
+#         return {}
+
+#     # Normalize frequency
+#     for k, v in group.items():
+#         v["freq"] = v.get("freq", 0) / float(total_rows)
+
+#     # Sort by recency descending and preserve as ordered dict (regular dict in py3.7+ keeps insertion order)
+#     sorted_items = sorted(group.items(), key=lambda it: it[1].get("recency", 0.0), reverse=True)
+#     ordered_group = {k: v for k, v in sorted_items}
+
+#     # Zero out recency beyond how_many_recent_to_keep
+#     for idx, (k, v) in enumerate(list(ordered_group.items()), start=1):
+#         if idx > how_many_recent_to_keep:
+#             v["recency"] = 0.0
+
+#     # Compute weighted score and confidence
+#     freq_w = float(cfg.get("frequency_weight", 0.4))
+#     rec_w = float(cfg.get("recency_weight", 0.6))
+#     total_score = 0.0
+#     for v in ordered_group.values():
+#         v["score"] = v.get("freq", 0.0) * freq_w + v.get("recency", 0.0) * rec_w
+#         total_score += v["score"]
+
+#     # Avoid division by zero
+#     if total_score <= 0:
+#         # set confidence 0 for all
+#         for v in ordered_group.values():
+#             v["confidence"] = 0.0
+#         return ordered_group
+
+#     for v in ordered_group.values():
+#         v["confidence"] = v.get("score", 0.0) / total_score
+#     return ordered_group
+
+
+# def _pick_best(group: Dict[str, Dict[str, Any]]) -> Tuple[str, float]:
+#     """
+#     Return (best_key, confidence). If tie for top confidence or group empty -> return ("", 0.0)
+#     """
+#     best_key = ""
+#     best_conf = -1.0
+#     for k, v in group.items():
+#         conf = float(v.get("confidence", 0.0))
+#         if conf > best_conf:
+#             best_conf = conf
+#             best_key = k
+#         elif conf == best_conf:
+#             # tie -> ambiguous
+#             return "NA", 0.0
+#     if best_conf < 0:
+#         return "NA", 0.0
+#     return best_key, round(best_conf, 6)
+
+
+# def main_gl_cc_predict(request: Dict[str, Any],
+#                        input_data: Dict[str, List[Dict[str, Any]]],
+#                        config: Dict[str, Any]) -> Dict[str, Any]:
+#     """
+#     Production-ready pipeline to predict GL Code and Cost Centre per invoice line.
+
+#     Returns:
+#         {"status":"success","status_code":200,"data": final_response}
+#     On failure:
+#         {"status_code":400, "status":"error", "message": "..."}
+#     """
+#     try:
+#         logger.info("Starting main_gl_cc_predict pipeline.")
+#         logger.info("#"*50)
+#         logger.info(f"Main gl_cc predict request: {request}")
+#         logger.info(f"main_gl_cc_predict input_data: {input_data}")
+#         logger.info("#"*50)
+
+#         # Validate config required keys
+#         required_cfg_keys = [
+#             "inv_line_detail_identifier",
+#             "invoicedate_field_in_header",
+#             "approverName_field_in_header",
+#             "invoicedate_field_in_invl_in_database",
+#             "GLCode_column_name_in_database",
+#             "CostCentre_column_name_in_database",
+#             "recency_weight",
+#             "frequency_weight",
+#             "lambda_decay",
+#             "recent_count",
+#             "how_many_recent_gl_to_consider",
+#         ]
+#         for k in required_cfg_keys:
+#             if k not in config:
+#                 raise KeyError(f"Missing required config key: '{k}'")
+
+#         inv_line_field = config.get("inv_line_detail_identifier")
+#         inv_date_header_field = config.get("invoicedate_field_in_header")
+#         approver_header_field = config.get("approverName_field_in_header")
+#         approver_database_name=config.get("Approver_column_name_in_database")
+#         invl_date_field = config.get("invoicedate_field_in_invl_in_database")
+#         glcol = config.get("GLCode_column_name_in_database")
+#         cccol = config.get("CostCentre_column_name_in_database")
+#         recent_count = int(config.get("recent_count", 1))
+#         lambda_decay=float(config.get("lambda_decay",0.01))
+#         how_many_recent_to_consider = int(config.get("how_many_recent_gl_to_consider", 1))
+        
+
+#         # Parse invoice-level date
+#         inv_date_raw = request.get(inv_date_header_field)
+#         inv_date = _parse_date(inv_date_raw)
+        
+#         final_response: List[Dict[str, Any]] = []
+
+#         invoice_lines = request.get(inv_line_field, [])
+#         if not isinstance(invoice_lines, list):
+#             raise ValueError(f"Expected '{inv_line_field}' to be a list in request.")
+
+#         for invl in invoice_lines:
+#             # Prepare data rows for this invoice line by expanding glCategories mapping from input_data
+#             gl_categories = invl.get("glCategories", []) or []
+#             data_rows: List[Dict[str, Any]] = []
+#             for category in gl_categories:
+#                 rows = input_data.get(category, [])
+#                 if isinstance(rows, list):
+#                     data_rows.extend(rows)
+
+#             total_rows = len(data_rows)
+
+#             # Build grouping structures
+#             grouped_by_glcode: Dict[str, Dict[str, Any]] = {}
+#             grouped_by_cc: Dict[str, Dict[str, Any]] = {}
+#             # additional store to keep actual items per CC if needed
+#             grouped_items_by_cc: Dict[str, List[Dict[str, Any]]] = {}
+
+#             # header approver to filter CC grouping
+#             header_approver = request.get(approver_header_field)
+#             # logger.info(f"$$$$$$$$$ Header approver: {header_approver}")
+
+#             # iterate rows and update groups
+#             for row in data_rows:
+#                 try:
+#                     item_date_raw = row.get(invl_date_field)
+#                     item_date = _parse_date(item_date_raw)
+#                 except Exception:
+#                     # skip rows with bad/missing date
+#                     logger.debug("Skipping row with invalid/missing date: %s", row)
+#                     continue
+
+#                 # GL code grouping
+#                 item_gl = row.get(glcol)
+
+#                 if item_gl:
+#                     _update_freq_and_recency(grouped_by_glcode, item_gl, item_date, inv_date, recent_count,lambda_decay)
+
+#                 # Cost Centre grouping only if approver matches header_approver
+#                 row_approver = row.get(approver_database_name)
+#                 # logger.info(f"$$$$$$$$$ row_approver: {header_approver} and {row_approver}")
+#                 if row_approver == header_approver:
+#                     # logger.info(f"$$$$$$$$$ if loop row_approver == header_approver: {header_approver} and {row_approver}")
+#                     item_cc = row.get(cccol)
+#                     if item_cc:
+#                         _update_freq_and_recency(grouped_by_cc, item_cc, item_date, inv_date, recent_count,lambda_decay)
+#                         # store items per CC for possible future use
+#                         # grouped_items_by_cc.setdefault(item_cc, []).append(row)
+#             # logger.info(f"$$$$$$$$$ grouped_by_glcode: {grouped_by_glcode}")
+#             # logger.info(f"$$$$$$$$$ grouped_by_cc: {grouped_by_cc}")
+#             # Finalize groups (normalize, sort, cutoff recency, compute confidence)
+#             grouped_by_glcode_final = _finalize_group(grouped_by_glcode,
+#                                                       total_rows,
+#                                                       how_many_recent_to_consider,
+#                                                       config)
+#             grouped_by_cc_final = _finalize_group(grouped_by_cc,
+#                                                   total_rows,
+#                                                   how_many_recent_to_consider,
+#                                                   config)
+#             # logger.info(f"$$$$$$$$$ grouped_by_glcode_final: {grouped_by_glcode_final}")
+#             # logger.info(f"$$$$$$$$$ grouped_by_cc_final: {grouped_by_cc_final}")
+#             best_gl="NA"
+#             gl_conf=0.0
+#             if grouped_by_glcode_final=={}:
+#                 best_gl="NA"
+#                 gl_conf=0.0
+#             else:
+#                 best_gl, gl_conf = _pick_best(grouped_by_glcode_final)
+#             best_cc="NA"
+#             cc_conf=0.0
+#             if grouped_by_cc_final=={}:
+#                 best_cc="NA"
+#                 cc_conf=0.0
+#             else:
+#                 best_cc, cc_conf = _pick_best(grouped_by_cc_final)
+#             #     logger.info(f"$$$$$$$$$ in else best_cc: {best_cc}")
+#             #     logger.info(f"$$$$$$$$$ in else cc_conf: {cc_conf}")
+#             # logger.info(f"$$$$$$$$$ best_cc: {best_cc}")
+#             # logger.info(f"$$$$$$$$$ cc_conf: {cc_conf}")
+#             # ensure non-negative confidences
+#             gl_conf = max(0.0, float(gl_conf))*100
+#             cc_conf = max(0.0, float(cc_conf))*100
+#             # logger.info(f"$$$$$$$$$ best_cc after max: {best_cc}")
+#             # logger.info(f"$$$$$$$$$ cc_conf after max: {cc_conf}")
+
+#             output_item = {
+#                 "Success": "True",
+#                 "ID": invl.get(config.get("field_name_for_invoice_line_id")),
+#                 "GL Code": {"field_value": str(best_gl), "confidence_score": gl_conf},
+#                 "Cost Code": {"field_value": str(best_cc), "confidence_score": cc_conf},
+#             }
+#             if (not best_gl or best_gl == "NA") and (not best_cc or best_cc == "NA"):
+#                 output_item["Success"] = "False"
+#             final_response.append(output_item)
+#             logger.info(
+#                 "Processed invoiceLineID=%s BestGL=%s(conf=%s) BestCC=%s(conf=%s)",
+#                 invl.get("invoiceLineID"), best_gl, gl_conf, best_cc, cc_conf
+#             )
+
+#         logger.info("main_gl_cc_predict completed successfully.")
+#         return {"status": "success", "status_code": 200, "data": final_response}
+
+#     except Exception as e:
+#         logger.exception("Error in main_gl_cc_predict pipeline.")
+#         return {
+#             "status_code": 400,
+#             "status": "error",
+#             "message": f"Main pipeline failed: {e}"
+#         }
