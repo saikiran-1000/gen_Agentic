@@ -1,0 +1,769 @@
+import json
+import os
+import pandas as pd
+import time
+import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
+from semantic_kernel.functions import KernelArguments
+from semantic_kernel import Kernel
+from agents.final_output_processor import FinalOutputProcessor
+import math
+
+
+logger = logging.getLogger(__name__)
+
+temp_ret=[0]
+temp_llm=[0]
+temp_embedpo=[0]
+temp_embedinv=[0]
+temp_parallel=[0]
+class RAGAgent:
+    """
+    RAG Agent using ThreadPoolExecutor for parallel batch processing.
+    """
+
+    def __init__(self, kernel: Kernel, config: dict, invoice_df=None, po_df=None):
+        self.config_from_json = config
+        self.kernel = kernel
+        self.embedding_plugin = self.kernel.plugins["EmbeddingPlugin"]
+        self.llm_reasoning_agent = self.kernel.plugins["LLMReasoningAgent"]
+        self.retrieval_plugin = self.kernel.plugins["RetrievalPlugin"]
+        self.salesforce_plugin = self.kernel.plugins["SalesforceStatusPlugin"]
+        # self.llm_reasoning_agent = LLMReasoningAgent()
+
+        # Load configuration
+        self.top_k_to_keep = self.config_from_json.get("TOP_K_TO_KEEP", 3)
+        self.top_k_to_extract = self.top_k_to_keep * 2
+        self.weight_to_embedding = self.config_from_json.get("WEIGHT_TO_EMBEDDING", 0.8)
+        self.weight_to_keyword = self.config_from_json.get("WEIGHT_TO_KEYWORD", 0.2)
+        self.threshold_score_for_similarity = self.config_from_json.get("THRESHOLD_SCORE_FOR_SIMILARITY", 0.5)
+        self.batch_size = self.config_from_json.get("BATCH_SIZE", 10)
+        self.lambda_mult = self.config_from_json.get("LAMBDA_MULT", 0.5)
+        self.delete_flag = self.config_from_json.get("DELETE", "yes")
+        self.inv_cross_check = self.config_from_json.get("INVOICE_LINE_CROSSCHECK", [])
+        self.parallel_batch_count = self.config_from_json.get("PARALLEL_BATCH_COUNT", 2)
+        self.cpu_count = os.cpu_count() or 4
+        self.max_workers = min(self.parallel_batch_count, self.cpu_count  * 10)
+        self.na_remove_flag = "yes"
+        self.reasoning_effort=self.config_from_json.get("REASONING_EFFORT")
+
+        # Field mappings
+        self.po_desc_field = self.config_from_json.get("PO_DESC_FIELD")
+        self.inv_desc_field = self.config_from_json.get("INV_DESC_FIELD")   
+        self.po_non_desc_fields = self.config_from_json.get("PO_NON_DESC_FIELDS", [])
+        self.inv_non_desc_fields = self.config_from_json.get("INV_NON_DESC_FIELDS", [])
+        self.invoice_line_identifier_field = self.config_from_json.get("INV_LINE_ID_FIELD")
+        self.po_line_identifier_field = self.config_from_json.get("PO_LINE_ID_FIELD")
+        self.temperature = self.config_from_json.get("TEMPERATURE", 0.2)
+        
+        # Parse Salesforce validation configuration
+        salesforce_config = self.config_from_json.get("SALESFORCE_VALIDATION_ENABLED", {"After_each_batch":"no","Once_at_the_end":"no"})
+        self.salesforce_validation_config = self._parse_salesforce_config(salesforce_config)
+        
+        self.confidence_score_weightage = self.config_from_json.get("Weightage_for_confidence_score", 
+                                                                     {"Semantic": 0.7, "LLM": 0.2, "Parameter_match": 0.1})
+        self.po_chunks_with_embeddings=[]
+        if not self.invoice_line_identifier_field:
+            raise ValueError("Invoice line identifier field is required but was not provided.")
+
+    def _parse_salesforce_config(self, config_value):
+        """Parse SALESFORCE_VALIDATION_ENABLED configuration."""
+        
+        if isinstance(config_value, dict):
+            after_each_batch = str(config_value.get("After_each_batch", "no")).lower() == "yes"
+            once_at_end = str(config_value.get("Once_at_the_end", "no")).lower() == "yes"
+            enabled = after_each_batch or once_at_end
+            if after_each_batch and once_at_end:
+                raise ValueError("Only one of 'After_each_batch' and 'Once_at_the_end' should be yes in SALESFORCE_VALIDATION_ENABLED")
+            if not enabled:
+                logger.warning("Salesforce validation disabled: both options are 'no'")
+            
+            return {"enabled": enabled, "after_each_batch": after_each_batch, "once_at_end": once_at_end}
+        
+        else:
+            logger.warning("Invalid SALESFORCE_VALIDATION_ENABLED format. Defaulting to disabled.")
+            return {"enabled": False, "after_each_batch": False, "once_at_end": False}
+
+    def _create_chunks(self, data: pd.DataFrame, desc_fields: list, non_desc_fields: list, line_identifier: str):
+        """Converts structured tabular data into text chunks for RAG."""
+        chunks = []
+        for _, row in data.iterrows():
+            temp_chunk = "-~-".join([str(row.get(field, "")) for field in desc_fields + non_desc_fields])
+            chunks.append({"id": row.get(line_identifier), "text": temp_chunk, "meta_data": {}})
+        return chunks
+
+    def _run_async_batch_in_thread(self, batch_embeddings, po_vdb, prompt1, user_prompt, temperature, invoice_lines):
+        """Wrapper to run async _process_batch in a thread."""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(
+                self._process_batch(batch_embeddings, po_vdb, self.threshold_score_for_similarity, 
+                                  self.top_k_to_keep, prompt1, user_prompt, temperature, invoice_lines)
+            )
+            loop.close()
+            return result
+        except Exception as e:
+            error_msg = f"Error in RAG Agent -> _run_async_batch_in_thread -> {str(e)}"
+            logger.exception(error_msg)
+            raise Exception(error_msg) from e
+        
+
+    def get_duplicates_to_remove(self, all_items_for_validation, all_true_items):
+        ans = []
+        # 1. Create a lookup set for 'True' items using InvoiceLineItemNumber
+        true_invoice_ids = {item.get('InvoiceLineItemNumber') for item in all_true_items}
+        # 2. Group items by PurchaseOrderNumber
+        po_map = {}
+        for item in all_items_for_validation:
+            po_num = item.get('PurchaseOrderNumber')
+            # Skip items where PO is null, None, or empty
+            if po_num and str(po_num).lower() != 'null':
+                if po_num not in po_map:
+                    po_map[po_num] = []
+                po_map[po_num].append(item)
+    
+        # 3. Iterate through the groups to find duplicates
+        for po_num, items in po_map.items():
+            # Check if duplicates exist (more than 1 invoice line for this PO)
+            if len(items) > 1:
+                # Find which items in this specific group are marked as "True"
+                true_matches_in_group = [
+                    i for i in items 
+                    if i.get('InvoiceLineItemNumber') in true_invoice_ids
+                ]
+                # --- LOGIC CORRECTION ---
+                # Condition 1: If EXACTLY ONE is True -> Keep it, remove others.
+                if len(true_matches_in_group) == 1:
+                    winner = true_matches_in_group[0]
+                    winner_id = winner.get('InvoiceLineItemNumber')
+                    # Add all other items in this group to 'ans'
+                    for i in items:
+                        if i.get('InvoiceLineItemNumber') != winner_id:
+                            ans.append(i.get('InvoiceLineItemNumber'))
+        return ans
+
+    async def run_rag(self, po_lines, invoice_lines, delete_list,prompt1: str = "", user_prompt: str = "", temperature: float = 0.2,
+                    reuse_vector_store: bool = False, existing_po_vdb = None):
+        """Main entry using ThreadPoolExecutor for parallel batch processing."""
+
+        logger.info("----------------------Starting RAG Agent (ThreadPool)----------------------")
+        logger.info(f"Salesforce validation config: {self.salesforce_validation_config}")
+        start_total = time.time()
+        all_removed_line=[]
+        try:
+            # Data preparation
+            try:
+                po_df = pd.DataFrame(po_lines).sample(frac=1).reset_index(drop=True)
+                invoice_df = pd.DataFrame(invoice_lines).sample(frac=1).reset_index(drop=True)
+
+                # delete_list = []
+                po_line_to_send = [po[self.po_line_identifier_field] for po in po_lines]
+                po_line_to_send_for_one_time_validation = po_line_to_send.copy()
+            except Exception as e:
+                error_msg = f"Error in RAG Agent -> run_rag -> Data Preparation -> {str(e)}"
+                logger.exception(error_msg)
+                raise Exception(error_msg) from e
+
+            # Step 1: Create or Reuse PO vector store
+            try:
+                if reuse_vector_store and existing_po_vdb is not None:
+                    logger.info("Reusing existing vector store for retry...")
+                    po_vdb = existing_po_vdb
+                    if delete_list:
+                        logger.info(f"Deleting {len(delete_list)} already tagged PO lines from vector store")
+                        await self.retrieval_plugin["delete_documents"].invoke(
+                            self.kernel, arguments=KernelArguments(ids_to_delete=delete_list, vector_store=po_vdb)
+                        )
+                else:
+                    logger.info("Creating new vector store...")
+                    po_chunks = self._create_chunks(po_df, self.po_desc_field, self.po_non_desc_fields, 
+                                                   self.po_line_identifier_field)
+                    pochunkt1=time.time()
+                    self.po_chunks_with_embeddings = (await self.embedding_plugin["generate_embeddings"].invoke(
+                        self.kernel, arguments=KernelArguments(data_list=po_chunks)
+                    )).value
+                    del po_chunks
+                    temp_embedpo[0]+=time.time()-pochunkt1
+                    embeddings_client = (await self.embedding_plugin["get_embeddings_client"].invoke(self.kernel)).value
+                    po_vdb = (await self.retrieval_plugin["initialize_vector_store"].invoke(
+                        self.kernel, arguments=KernelArguments(embeddings_client=embeddings_client)
+                    )).value
+                    
+                    await self.retrieval_plugin["store_documents"].invoke(
+                        self.kernel, arguments=KernelArguments(chunks=self.po_chunks_with_embeddings, vector_store=po_vdb)
+                    )
+                    del embeddings_client
+            except Exception as e:
+                error_msg = f"Error in RAG Agent -> run_rag -> PO Vector Store Creation/Reuse -> {str(e)}"
+                logger.exception(error_msg)
+                raise Exception(error_msg) from e
+
+            # Step 2: Generate ALL invoice embeddings ONCE
+            try:
+                start_embedding = time.time()
+                invoice_chunks = self._create_chunks(invoice_df, self.inv_desc_field, self.inv_non_desc_fields, 
+                                                    self.invoice_line_identifier_field)
+                timeinv=time.time()
+                invoice_embeddings = (await self.embedding_plugin["generate_embeddings"].invoke(
+                    self.kernel, arguments=KernelArguments(data_list=invoice_chunks)
+                )).value
+                del invoice_chunks
+                temp_embedinv[0]+=time.time()-timeinv
+                logger.info(f"Generated {len(invoice_embeddings)} embeddings in {time.time() - start_embedding:.2f}s")
+            except Exception as e:
+                error_msg = f"Error in RAG Agent -> run_rag -> Invoice Embeddings Generation -> {str(e)}"
+                logger.exception(error_msg)
+                raise Exception(error_msg) from e
+
+            # Step 3: ThreadPoolExecutor for Parallel Processing
+            try:
+                all_true_items = []
+                true_all_true_items=[]
+                all_false_items = []
+                len_inv = len(invoice_embeddings)
+                big_batch_size = self.batch_size * self.parallel_batch_count
+
+                logger.info(f"Processing {len_inv} invoices with ThreadPool (max_workers={self.max_workers})")
+                all_batch_results_with_metadata=[]
+                for start in range(0, len_inv, big_batch_size):
+                    try:
+                        end = min(start + big_batch_size, len_inv)
+                        batch_embeddings = invoice_embeddings[start:end]
+                        logger.info(f"Processing embeddings {start} to {end - 1}")
+
+                        sub_batches = [batch_embeddings[i:i + self.batch_size] 
+                                      for i in range(0, len(batch_embeddings), self.batch_size)]
+                        batch_results_with_metadata = []
+                        tptime=time.time()
+                        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                            futures = [executor.submit(self._run_async_batch_in_thread, sub_batch, po_vdb, 
+                                                     prompt1, user_prompt, temperature, invoice_lines) 
+                                      for sub_batch in sub_batches]
+                            
+                            for idx, future in enumerate(futures):
+                                try:
+                                    batch_result = future.result()
+                                    batch_results_with_metadata.extend(batch_result)
+                                    all_batch_results_with_metadata.extend(batch_result)
+                                except Exception as e:
+                                    error_msg = f"Error in RAG Agent -> run_rag -> Thread Execution -> Batch {idx} -> {str(e)}"
+                                    logger.exception(error_msg)
+                                    raise Exception(error_msg) from e
+                        temp_parallel[0]+=time.time()-tptime
+                        del sub_batches, futures
+
+                        # Collect all LLM responses from this big batch
+                        merged_llm_responses = [item["llm_response"] for item in batch_results_with_metadata 
+                                               if item.get("llm_response")]
+                        logger.info(f"Collected {len(merged_llm_responses)} LLM responses from parallel batches")
+
+                        # Validation after each big batch (if enabled)
+                        try:
+                            # batch_true_items = []
+                            # batch_false_items = []
+                            if self.salesforce_validation_config["after_each_batch"] and self.salesforce_validation_config["enabled"]:
+                                logger.info("Running Salesforce validation after merged batch...")
+                                
+                                if merged_llm_responses:
+                                    salesforce_input = {
+                                        'input_data': merged_llm_responses,
+                                        'extraParams': {'untaggedPOLines': ','.join(po_line_to_send)}
+                                    }
+                                    
+                                    processor = FinalOutputProcessor(self.kernel, "None", self.config_from_json, 
+                                                                    self.salesforce_plugin)
+                                    validated_results = await processor.process(salesforce_input)
+                                    del processor
+                                    logger.info(f"Result from Validation Layer: {validated_results}")
+                                    for r in validated_results:
+                                        status = str(r.get("Status")).lower()
+                                        sf_reason = r.get("MatchingReason", "None")
+                                        # logger.info(f"sf_reason: {type(sf_reason)} -- {sf_reason}")
+                                        if isinstance(sf_reason, str):
+                                            prefix = "False" if status == "false" else "True"
+                                            r["MatchingReason"] = f"{prefix} from Batch Validation: {sf_reason}"
+                                    
+                                    batch_true_items = [itm for itm in validated_results if str(itm.get("Status", "")).lower() == "true"]
+                                    batch_false_items = [itm for itm in validated_results if str(itm.get("Status", "")).lower() != "true"]
+                                    rpt_invls= self.get_duplicates_to_remove(merged_llm_responses,batch_true_items)
+                                    all_removed_line.extend(rpt_invls)
+                                    del validated_results
+                                    
+                                    logger.info(f"Batch validation: {len(batch_true_items)} true, {len(batch_false_items)} false")
+                                else:
+                                    batch_true_items = []
+                                    batch_false_items = []
+                            else:
+                                batch_true_items = merged_llm_responses
+                                batch_false_items = []
+                                logger.info(f"No batch validation - treating {len(batch_true_items)} items as true")
+                        except Exception as e:
+                            error_msg = f"Error in RAG Agent -> run_rag -> Batch Validation -> {str(e)}"
+                            logger.exception(error_msg)
+                            raise Exception(error_msg) from e
+                        
+                        del merged_llm_responses
+
+                        # Calculate confidence scores
+                        try:
+                            batch_true_items = self._calculate_confidence_scores(batch_true_items, batch_results_with_metadata, 
+                                                                                invoice_lines)
+                            true_all_true_items.extend(batch_true_items)
+                        except Exception as e:
+                            error_msg = f"Error in RAG Agent -> run_rag -> Confidence Score Calculation -> {str(e)}"
+                            logger.exception(error_msg)
+                            raise Exception(error_msg) from e
+                        
+                        # Handle duplicate POs within this batch
+                        try:
+                            batch_true_items, batch_false_items_from_duplicates,removed_invl = self._handle_duplicate_pos(
+                                batch_true_items, batch_results_with_metadata)
+                            batch_false_items.extend(batch_false_items_from_duplicates)
+                            all_removed_line.extend(removed_invl)
+                            del batch_false_items_from_duplicates, batch_results_with_metadata
+                        except Exception as e:
+                            error_msg = f"Error in RAG Agent -> run_rag -> Duplicate PO Handling -> {str(e)}"
+                            logger.exception(error_msg)
+                            raise Exception(error_msg) from e
+                        
+                        # Update delete list
+                        if self.delete_flag == "yes":
+                            for item in batch_true_items:
+                                po_num = item.get("PurchaseOrderNumber")
+                                if po_num and str(po_num) not in delete_list and po_num != "null":
+                                    delete_list.append(str(po_num))
+                                    if str(po_num) in po_line_to_send:
+                                        po_line_to_send.remove(str(po_num))
+                        all_true_items.extend(batch_true_items)
+                        all_false_items.extend(batch_false_items)
+                        del batch_true_items, batch_false_items
+
+                    except Exception as e:
+                        if "Error in RAG Agent" not in str(e):
+                            error_msg = f"Error in RAG Agent -> run_rag -> Batch Processing Loop (batch {start}-{end}) -> {str(e)}"
+                            logger.exception(error_msg)
+                            raise Exception(error_msg) from e
+                        else:
+                            raise
+
+                del invoice_embeddings
+
+            except Exception as e:
+                if "Error in RAG Agent" not in str(e):
+                    error_msg = f"Error in RAG Agent -> run_rag -> Parallel Processing -> {str(e)}"
+                    logger.exception(error_msg)
+                    raise Exception(error_msg) from e
+                else:
+                    raise
+
+            # Step 4: Once at the end validation (if enabled)
+            try:
+                if self.salesforce_validation_config["once_at_end"] and self.salesforce_validation_config["enabled"]:
+                    logger.info("Running Salesforce validation once at the end...")
+                    
+                    # all_items_for_validation = all_true_items + all_false_items
+                    all_items_for_validation = true_all_true_items
+                    
+                    logger.info(f"all_items_for_validation: {all_items_for_validation}")
+                    if all_items_for_validation:
+                        salesforce_input = {
+                            'input_data': all_items_for_validation,
+                            'extraParams': {'untaggedPOLines': ','.join(po_line_to_send_for_one_time_validation)}
+                        }
+                        
+                        processor = FinalOutputProcessor(self.kernel, "None", self.config_from_json, 
+                                                        self.salesforce_plugin)
+                        validated_results = await processor.process(salesforce_input)
+                        del processor
+                        
+                        for r in validated_results:
+                            status = str(r.get("Status")).lower()
+                            sf_reason = r.get("MatchingReason", "None")
+                            if isinstance(sf_reason, str):
+                                prefix = "False" if status == "false" else "True"
+                                r["MatchingReason"] = f"{prefix} from Final Validation: {sf_reason}"
+                        
+                        all_true_items = [itm for itm in validated_results if str(itm.get("Status", "")).lower() == "true"]
+                        all_false_items = [itm for itm in validated_results if str(itm.get("Status", "")).lower() != "true"]
+                        rpt_invlss= self.get_duplicates_to_remove(all_items_for_validation,all_true_items)
+                        all_removed_line.extend(rpt_invlss)
+                        del rpt_invlss
+                        #######################################
+                        # Handle duplicate POs within this batch
+                        try:
+                            all_true_items, batch_false_items_from_duplicates,removed_invl = self._handle_duplicate_pos(
+                                all_true_items, all_batch_results_with_metadata)
+                            # batch_false_items.extend(batch_false_items_from_duplicates)
+                            all_false_items.extend(batch_false_items_from_duplicates)
+                            all_removed_line=removed_invl
+                            del batch_false_items_from_duplicates, all_batch_results_with_metadata
+                        except Exception as e:
+                            error_msg = f"Error in RAG Agent -> run_rag -> Duplicate PO Handling -> {str(e)}"
+                            logger.exception(error_msg)
+                            raise Exception(error_msg) from e
+                        #######################################
+                        del validated_results
+                        
+                        logger.info(f"Final validation complete: {len(all_true_items)} true, {len(all_false_items)} false")
+            except Exception as e:
+                error_msg = f"Error in RAG Agent -> run_rag -> Final Validation -> {str(e)}"
+                logger.exception(error_msg)
+                raise Exception(error_msg) from e
+
+            # Step 5: Build final result
+            try:
+                return_pair = []
+                logger.info(f"ALL true items: {len(all_true_items)}, false items: {len(all_false_items)}")
+                
+                for item in all_false_items:
+                    return_pair.append({
+                        "InvoiceLineItemNumber": item.get("InvoiceLineItemNumber"),
+                        "PurchaseOrderNumber": "null",
+                        "MatchPercentage": 0,
+                        "MatchingReason": item.get("MatchingReason", "False from Validation Layer")
+                    })
+                
+                for match in all_true_items:
+                    return_pair.append({
+                        "InvoiceLineItemNumber": match.get("InvoiceLineItemNumber"),
+                        "PurchaseOrderNumber": match.get("PurchaseOrderNumber", "null"),
+                        "MatchPercentage": match.get("MatchPercentage", 0),
+                        "MatchingReason": match.get("MatchingReason", "True from validation layer")
+                    })
+                logger.info(f"all_removed_line: {all_removed_line}")
+                del all_true_items, all_false_items
+                
+                logger.info(f"RAG Agent completed in {time.time() - start_total:.2f}s")
+                logger.info(f"+++++++++++++++++++++RETRIEVAL AGENT completed in {temp_ret}s")
+                logger.info(f"+++++++++++++++++++++EMBEDDING AGENT PO completed in {temp_embedpo}s")
+                logger.info(f"+++++++++++++++++++++EMBEDDING AGENT INV completed in {temp_embedinv}s")
+                logger.info(f"+++++++++++++++++++++LLM AGENT completed in {temp_llm}s")
+                logger.info(f"+++++++++++++++++++++PARALLEL completed in {temp_parallel}s")
+                return return_pair, po_vdb, all_removed_line
+                
+            except Exception as e:
+                error_msg = f"Error in RAG Agent -> run_rag -> Building Final Result -> {str(e)}"
+                logger.exception(error_msg)
+                raise Exception(error_msg) from e
+
+        except Exception as e:
+            if "Error in RAG Agent" not in str(e):
+                error_msg = f"Error in RAG Agent -> run_rag -> {str(e)}"
+                logger.exception(error_msg)
+                raise Exception(error_msg) from e
+            else:
+                raise
+
+    def _calculate_confidence_scores(self, true_items, batch_results_with_metadata, invoice_lines):
+        """Calculate confidence scores for true items."""
+        invoice_lookup = {}
+        batch_llm_input_lookup = {}
+        
+        for item in batch_results_with_metadata:
+            if item.get("raw_input_list1"):
+                for entry in item["raw_input_list1"]:
+                    inv_id = entry["Invoice Line"]["id"]
+                    invoice_lookup[inv_id] = entry.get("Possible PO Line matches", [])
+            
+            if item.get("batch_llm_input"):
+                inv_line = item["batch_llm_input"]["Invoice Line"]
+                inv_id = inv_line.get(self.invoice_line_identifier_field)
+                batch_llm_input_lookup[inv_id] = inv_line
+        
+        try:
+            for t in true_items:
+                inv_id = t.get("InvoiceLineItemNumber")
+                po_id = t.get("PurchaseOrderNumber")
+
+                if inv_id not in invoice_lookup:
+                    continue
+
+                po_match = next((m for m in invoice_lookup[inv_id] if m.get("PurchaseOrderNumber") == po_id), None)
+                if not po_match:
+                    continue
+
+                hybrid_score = float(po_match.get("hybrid_search_score", 0))
+                old_match_percent = t.get("MatchPercentage", 0) / 100 if isinstance(t.get("MatchPercentage"), (int, float)) else 0
+                
+                all_str = " ".join(str(po_match[key]) for key in po_match 
+                                 if key in self.po_non_desc_fields or key in self.po_desc_field)
+                
+                flag = 0
+                if inv_id in batch_llm_input_lookup:
+                    temp_invl_dict = batch_llm_input_lookup[inv_id]
+                    for field_name in self.inv_cross_check:
+                        field_val = temp_invl_dict.get(field_name)
+                        if isinstance(field_val, str) and field_val != "NA" and field_val in all_str:
+                            flag = 1
+                            break
+ 
+                semantic_weight = self.confidence_score_weightage.get("Semantic", 0.7)
+                LLM_weight = self.confidence_score_weightage.get("LLM", 0.2)  
+                weight_param = self.confidence_score_weightage.get("Parameter_match", 0.1)   
+                new_score = hybrid_score * semantic_weight + old_match_percent * LLM_weight + weight_param * flag
+                t["MatchPercentage"] = math.ceil(new_score * 100)
+                
+        except Exception as e:
+            logger.exception(f"Error calculating confidence score: {e}")
+            raise ValueError(f"Error calculating confidence score: {e}")
+        
+        return true_items
+
+    def _handle_duplicate_pos(self, true_items, batch_results_with_metadata):
+        """Handle duplicate PO numbers by keeping only the highest hybrid score."""
+        po_counts = Counter([itm.get("PurchaseOrderNumber", "null") for itm in true_items])
+        repeated_po = [po for po, cnt in po_counts.items() if cnt > 1 and po != "null"]
+        false_items_from_duplicates = []
+        removed_invl=[]
+        if repeated_po:
+            logger.info(f"Same-batch duplicate PO(s): {repeated_po}")
+            
+            for po in repeated_po:
+                ll_matches = [itm for itm in true_items if itm.get("PurchaseOrderNumber") == po]
+                scores = {}
+
+                for itm in ll_matches:
+                    inv_id = itm.get("InvoiceLineItemNumber")
+                    for item in batch_results_with_metadata:
+                        if item.get(self.invoice_line_identifier_field) == inv_id:
+                            for m in item.get("matches_with_scores", []):
+                                if m.get("PurchaseOrderNumber") == po:
+                                    scores[inv_id] = m.get("hybrid_search_score", 0)
+                                    break
+
+                if scores:
+                    best_invoice = max(scores, key=scores.get)
+                    for inv_id in scores:
+                        if inv_id != best_invoice:
+                            item_to_remove = next((item for item in true_items 
+                                                  if item.get("InvoiceLineItemNumber") == inv_id), None)
+                            if item_to_remove:
+                                true_items.remove(item_to_remove)
+                                false_items_from_duplicates.append({
+                                    "InvoiceLineItemNumber": inv_id,
+                                    "PurchaseOrderNumber": "null",
+                                    "MatchPercentage": 0,
+                                    "MatchingReason": "Duplicate PO, lower score"
+                                })
+                                removed_invl.append(inv_id)
+        
+        return true_items, false_items_from_duplicates, removed_invl
+
+    def _structure_output(self, scored_docs, my__dict1, my__dict2):
+        """Domain-specific structuring of retrieved documents."""
+        op_list = []
+        op_list1 = []
+
+        for doc in scored_docs[: self.top_k_to_keep]:
+            doc_list = doc["content"].split("-~-")
+            dict1 = {}
+
+            if not self.po_desc_field:
+                for i, field in enumerate(self.po_non_desc_fields):
+                    if i < len(doc_list):
+                        dict1[field] = doc_list[i]
+            else:
+                idx = 0
+                for field in self.po_desc_field:
+                    if idx < len(doc_list):
+                        dict1[field] = doc_list[idx]
+                        idx += 1
+                for i, field in enumerate(self.po_non_desc_fields):
+                    if idx + i < len(doc_list):
+                        dict1[field] = doc_list[idx + i]
+
+            dict1["PurchaseOrderNumber"] = doc["id"]
+            dict2 = dict1.copy()
+            dict2["hybrid_search_score"] = doc["score"]
+
+            op_list.append(dict1)
+            op_list1.append(dict2)
+
+        if op_list:
+            my__dict1["Possible PO Line matches"] = op_list
+            my__dict2["Possible PO Line matches"] = op_list1
+
+        return [my__dict1], [my__dict2], my__dict1, my__dict2
+
+    def _safe_parse_llm_response(self, response):
+        """Parses LLM string output into Python list/dict safely."""
+        response_str = str(response)
+        start = response_str.find("[")
+        end = response_str.rfind("]")
+        bracketed_content = response_str[start : end + 1] if start != -1 and end > start else ""
+
+        try:
+            parsed = json.loads(bracketed_content)
+        except json.JSONDecodeError:
+            try:
+                import ast
+                parsed = ast.literal_eval(bracketed_content)
+            except (ValueError, SyntaxError):
+                parsed = response
+
+        if isinstance(parsed, list):
+            parsed = [item for item in parsed if isinstance(item, dict)]
+            
+            for item in parsed:
+                po_number = item.get("PurchaseOrderNumber")
+                item["PurchaseOrderNumber"] = "null" if po_number is None else str(po_number)
+                
+                inv_number = item.get("InvoiceLineItemNumber")
+                item["InvoiceLineItemNumber"] = str(inv_number) if inv_number is not None else ""
+                
+                reason = item.get("MatchingReason")
+                item["MatchingReason"] = str(reason) if reason is not None else ""
+                
+                percentage = item.get("MatchPercentage")
+                try:
+                    item["MatchPercentage"] = int(percentage) if percentage is not None else 0
+                except (ValueError, TypeError):
+                    item["MatchPercentage"] = 0
+        else:
+            logger.warning("Invalid LLM response format. Returning empty list.")
+            parsed = []
+
+        return parsed
+    
+    async def _process_batch(self, batch, po_vdb, threshold, top_k_to_keep, prompt1,user_prompt, temperature, invoice_lines=None):
+        """Process a batch of invoice embeddings (retrieval + LLM only)."""
+        logger.info(f"[Thread] Processing batch of {len(batch)} invoices")
+
+        try:
+            batch_llm_input = []
+            batch_retrieval_results = []
+            low_threshold_list=[]
+            for inv_emb_item in batch:
+                try:                
+                    inv_id = inv_emb_item.get("id")
+                    inv_text = inv_emb_item.get("text")
+
+                    my__dict1 = {"Invoice Line": {"id": inv_id, "text": inv_text}}
+                    my__dict2 = {"Invoice Line": {"id": inv_id, "text": inv_text}}
+                    query_embedding_data = {"id": inv_id, "text": inv_text, "embedding": inv_emb_item.get("embedding")}
+                    
+                    # Retrieval step
+                    try:
+                        t1=time.time()
+                        retrieval_result = await self.retrieval_plugin["retrieve_documents"].invoke(
+                            self.kernel, arguments=KernelArguments(
+                                query_embedding_data=query_embedding_data, vector_store=po_vdb,
+                                top_k=self.top_k_to_keep, weight_to_embedding=self.weight_to_embedding,
+                                weight_to_keyword=self.weight_to_keyword, lambda_mult=self.lambda_mult,doc_embeddings=self.po_chunks_with_embeddings
+                            )
+                        )
+                        total_t1=time.time()-t1
+                        temp_ret[0]+=total_t1
+                        scored_docs = retrieval_result.value
+                    except Exception as e:
+                        error_msg = f"Error in RAG Agent -> _process_batch -> Retrieval (invoice: {inv_id}) -> {str(e)}"
+                        logger.exception(error_msg)
+                        raise Exception(error_msg) from e
+
+                    # Structure output
+                    try:
+                        input_list, input_list1, _, _ = self._structure_output(scored_docs, my__dict1, my__dict2)
+                    except Exception as e:
+                        error_msg = f"Error in RAG Agent -> _process_batch -> Structure Output (invoice: {inv_id}) -> {str(e)}"
+                        logger.exception(error_msg)
+                        raise Exception(error_msg) from e
+
+                    matches_with_scores = []
+                    matches = []
+                    if input_list1:
+                        po_matches = input_list1[0].get("Possible PO Line matches", [])
+                        matches_with_scores = [m for m in po_matches if m.get("hybrid_search_score", 0) >= threshold]
+                        matches_with_scores = sorted(matches_with_scores, key=lambda x: x.get("hybrid_search_score", 0), 
+                                                    reverse=True)[: top_k_to_keep]
+                        matches = [{k: v for k, v in m.items() if k != "hybrid_search_score"} for m in matches_with_scores]
+
+                    if self.na_remove_flag.lower() == "yes":
+                        matches = [{k: v for k, v in m.items() if v != "NA"} for m in matches]
+
+                    if matches:
+                        invoice_line_full = next((inv for inv in invoice_lines 
+                                                if inv.get(self.invoice_line_identifier_field) == inv_id), {})
+                        temp_dict = {k: v for k, v in invoice_line_full.items() if v != "NA"}
+                        batch_llm_input.append({"Invoice Line": temp_dict, "Possible PO Line matches": matches})
+                    else:
+                        low_threshold_list.append(inv_id)
+
+                    batch_retrieval_results.append({
+                        self.invoice_line_identifier_field: inv_id,
+                        "invoice_text": inv_text,
+                        "matches": matches,
+                        "matches_with_scores": matches_with_scores,
+                        "raw_input_list": input_list,
+                        "raw_input_list1": input_list1
+                    })
+
+                except Exception as e:
+                    if "Error in RAG Agent" not in str(e):
+                        error_msg = f"Error in RAG Agent -> _process_batch -> Processing Invoice {inv_emb_item.get('id', 'unknown')} -> {str(e)}"
+                        logger.exception(error_msg)
+                        # Continue to next invoice instead of failing entire batch
+                        continue
+                    else:
+                        raise
+            
+            # Run LLM on batch
+            try:
+                batch_llm_response=[]
+                if batch_llm_input:
+                    # Use the user_prompt parameter and format it
+                    formatted_user_prompt = user_prompt.format(batch_llm_input=batch_llm_input)
+                    timellm=time.time()
+                    raw_response, total_tokens = (await self.llm_reasoning_agent["generate_response"].invoke(
+                        self.kernel, arguments=KernelArguments(system_prompt=prompt1, user_prompt=formatted_user_prompt,reasoning_effort=self.reasoning_effort, temperature=temperature)
+                    )).value
+                    logger.info(f"RAW RESPONSE FROM LLM (tokens: {total_tokens})")
+                    temp_llm[0]+=time.time()-timellm
+                    batch_llm_response = self._safe_parse_llm_response(raw_response)
+                    for ltl in low_threshold_list:
+                        batch_llm_response.append({"InvoiceLineItemNumber":ltl,
+                                                   "PurchaseOrderNumber":"null",
+                                                   "MatchPercentage":0,
+                                                   "MatchingReason":f"No PO line found with hybrid_score > {threshold}"})
+            except Exception as e:
+                error_msg = f"Error in RAG Agent -> _process_batch -> LLM Invocation -> {str(e)}"
+                logger.exception(error_msg)
+                raise Exception(error_msg) from e
+            
+            # Map responses back
+            try:
+                mapped_responses = {item["InvoiceLineItemNumber"]: item for item in batch_llm_response}
+
+                results_with_metadata = []
+                for ret in batch_retrieval_results:
+                    inv_id = ret[self.invoice_line_identifier_field]
+                    llm_resp = mapped_responses.get(inv_id, {})
+                    corresponding_llm_input = next((item for item in batch_llm_input 
+                                                   if item["Invoice Line"].get(self.invoice_line_identifier_field) == inv_id), None)
+                    
+                    results_with_metadata.append({
+                        self.invoice_line_identifier_field: inv_id,
+                        "invoice_text": ret["invoice_text"],
+                        "matches": ret["matches"],
+                        "matches_with_scores": ret["matches_with_scores"],
+                        "raw_input_list": ret["raw_input_list"],
+                        "raw_input_list1": ret["raw_input_list1"],
+                        "llm_response": llm_resp if llm_resp else None,
+                        "batch_llm_input": corresponding_llm_input
+                    })
+                
+                return results_with_metadata
+            except Exception as e:
+                error_msg = f"Error in RAG Agent -> _process_batch -> Mapping Results -> {str(e)}"
+                logger.exception(error_msg)
+                raise Exception(error_msg) from e
+
+        except Exception as e:
+            if "Error in RAG Agent" not in str(e):
+                error_msg = f"Error in RAG Agent -> _process_batch -> {str(e)}"
+                logger.exception(error_msg)
+                raise Exception(error_msg) from e
+            else:
+                raise
