@@ -1,0 +1,297 @@
+import datetime
+import logging
+import json
+
+logger = logging.getLogger(__name__)
+
+
+def get_last_12_months(date_str: str) -> list[dict]:
+    """
+    Generate a list of the last 12 months (oldest → newest) 
+    based on the given date.
+
+    Args:
+        date_str (str): A date string in "YYYY-MM-DD" format.
+
+    Returns:
+        list[dict]: A list of dictionaries where each entry contains:
+            {
+                "month": "Sep",
+                "year": "2024",
+                "key": "2024-09"
+            }
+    """
+    try:
+        today = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    except Exception as e:
+        logging.error(f"Invalid date '{date_str}', expected 'YYYY-MM-DD'. Error: {e}")
+        raise ValueError(f"Invalid input date. Please use format 'YYYY-MM-DD'. -- {e}") from e
+
+    try:
+        curr_month = today.month
+        curr_year = today.year
+
+        months = []
+        for i in range(12):
+            # Compute oldest → newest
+            month = curr_month - (11 - i)
+            year = curr_year
+            if month <= 0:
+                month += 12
+                year -= 1
+
+            months.append({
+                "month": datetime.date(1900, month, 1).strftime("%b"),
+                "year": str(year),
+                "key": f"{year}-{month:02d}"
+            })
+
+        return months
+    except Exception as e:
+        logging.error(f"Error while generating last 12 months: {e}")
+        raise
+
+
+
+def calculate_monthly_variance(request: dict, config: dict) -> dict:
+    """
+    Calculate monthly variance % between invoiceQuantity and grnQuantity 
+    for the last 12 months.
+
+    Rules:
+        - Always return all last 12 months (month, year, variance).
+        - If no data for a month → variance = "NA".
+        - If invoiceQuantity = 0 → variance = "NA".
+        - Raises KeyError if required config fields are missing.
+    """
+    try:
+        logger.info("Starting monthly variance calculation...")
+        # logger.info("CONFIG: ",config)
+        # Validate config
+        required_keys = [
+            "invoice_date_field",
+            "invoice_line_field_name",
+            "invoice_line_id_field_identifier",
+            "common_name_to_table_field",
+        ]
+        for key in required_keys:
+            if key not in config:
+                raise KeyError(f"Missing config key: '{key}'")
+
+        common_mapping = config["common_name_to_table_field"]
+        for field in ["inv_date", "inv_qty", "grn_qty"]:
+            if field not in common_mapping:
+                raise KeyError(f"Missing mapping for '{field}' in common_name_to_table_field")
+
+        # Validate request
+        if config["invoice_date_field"] not in request:
+            raise KeyError(
+                f"Request missing required date field: {config['invoice_date_field']}"
+            )
+
+        last_12_months = get_last_12_months(request[config["invoice_date_field"]])
+        results = {}
+
+        for idx, line in enumerate(request.get(config["invoice_line_field_name"], []), start=1):
+            try:
+                historical_data = line.get("historicalData", [])
+                monthly_data = {}
+
+                # Aggregate invoice & GRN quantities
+                for record in historical_data:
+                    try:
+                        dt = datetime.datetime.strptime(
+                            record[common_mapping["inv_date"]], "%Y-%m-%d"
+                        )
+                        month_key = dt.strftime("%Y-%m")
+
+                        if month_key not in monthly_data:
+                            monthly_data[month_key] = {"invoice_sum": 0, "grn_sum": 0}
+
+                        inv_qty = record.get(common_mapping["inv_qty"], 0)
+                        gr_qty = record.get(common_mapping["grn_qty"], 0)
+
+                        try:
+                            inv_qty = float(inv_qty)
+                            gr_qty = float(gr_qty)
+                        except Exception:
+                            inv_qty = 0
+                            gr_qty = 0
+
+                        monthly_data[month_key]["invoice_sum"] += inv_qty
+                        monthly_data[month_key]["grn_sum"] += gr_qty
+                    except KeyError as e:
+                        logger.warning(
+                            "Line %d record missing field %s: %s", idx, e, record
+                        )
+                        continue
+                    except ValueError as e:
+                        logger.error(
+                            "Invalid date format in line %d record %s: %s", idx, record, e
+                        )
+                        continue
+
+                # Build variance output for last 12 months
+                monthly_variances = []
+                for m in last_12_months:
+                    key = m["key"]
+                    month_name = m["month"]
+                    year = m["year"]
+
+                    if key in monthly_data:
+                        inv_total = monthly_data[key]["invoice_sum"]
+                        grn_total = monthly_data[key]["grn_sum"]
+
+                        if inv_total >= 0 and grn_total > 0:
+                            variance_pct = round(
+                                ((grn_total - inv_total) / grn_total) * 100, 2
+                            )
+                            variance = f"{abs(variance_pct)}%"
+                        else:
+                            variance = "NA"
+                    else:
+                        variance = "NA"
+
+                    monthly_variances.append(
+                        {"month": month_name, "year": year, "variance": variance}
+                    )
+
+                line_id = line.get(config["invoice_line_id_field_identifier"])
+                if not line_id:
+                    raise KeyError(
+                        f"Line {idx} missing invoice line identifier '{config['invoice_line_id_field_identifier']}'"
+                    )
+                monthly_variances.reverse()
+                results[line_id] = monthly_variances
+                logger.debug(
+                    "Line %d enriched with %d monthly variances.", idx, len(monthly_variances)
+                )
+
+            except Exception as e:
+                logger.error("Error processing line %d: %s", idx, e, exc_info=True)
+
+        logger.info("Monthly variance calculation completed.")
+        return results
+
+    except Exception as e:
+        logger.exception("Error in calculate_monthly_variance.")
+        raise RuntimeError(f"Failed to calculate monthly variance.--{e}") from e
+
+
+def merge_request(llm_res: dict, request: dict, config: dict) -> dict:
+    """
+    Merge LLM response with request data based on invoice line identifier mapping.
+
+    Args:
+        llm_res (dict): Response dictionary from LLM.
+        request (dict): Request dictionary containing reference data.
+        config (dict): Configuration containing field mappings.
+
+    Returns:
+        dict: Updated LLM response with merged request data.
+
+    Raises:
+        RuntimeError: If merging fails due to invalid mapping or missing data.
+    """
+    try:
+        logger.info("Merging LLM response with request...")
+
+        llm_response = llm_res.copy()
+        field_name = config["invoice_line_id_field_identifier"]
+        temp_dict = config["LLM_to_salesforce_key_mapping"]
+
+        # Resolve the mapping
+        if field_name in temp_dict:
+            line_id_in_response = temp_dict[field_name]
+        elif field_name in temp_dict.values():
+            line_id_in_response = next(
+                (k for k, v in temp_dict.items() if v == field_name), None
+            )
+        else:
+            raise ValueError(
+                f"Unable to resolve field_name '{field_name}' in mapping {temp_dict}"
+            )
+
+        temp_data = llm_response.get("invoiceLineItemsResults", [])
+        if not isinstance(temp_data, list):
+            raise TypeError("'invoiceLineItemsResults' must be a list of dicts.")
+
+        for idx, item in enumerate(temp_data, start=1):
+            try:
+                if not isinstance(item, dict):
+                    raise TypeError(
+                        f"Item at index {idx} in 'invoiceLineItemsResults' must be a dict."
+                    )
+
+                inv_id = item.get(line_id_in_response)
+                if inv_id is None:
+                    logger.error(
+                        "Line %d missing expected key '%s': %s",
+                        idx, line_id_in_response, item
+                    )
+                    continue
+
+                if inv_id not in request:
+                    logger.error(
+                        "inv_id '%s' from LLM response not found in request keys: %s",
+                        inv_id, list(request.keys())
+                    )
+                    continue
+
+                item["trend"] = request[inv_id]
+                logger.debug("Line %d enriched with trend for inv_id %s.", idx, inv_id)
+
+            except Exception as e:
+                logger.error("Error processing line %d: %s", idx, e, exc_info=True)
+
+        logger.info("Merge process completed successfully.")
+        return llm_response
+
+    except Exception as e:
+        logger.exception("Error in merge_request.")
+        raise RuntimeError(f"Failed to merge LLM response with request. --{e}") from e
+
+
+
+def main_trend(llm_response: dict, request: dict, config: dict) -> dict:
+    """
+    Entry point for running monthly variance calculation.
+
+    Args:
+        llm_response (dict): Response from the LLM pipeline.
+        request (dict): Incoming request data.
+        config (dict): Configuration parameters.
+
+    Returns:
+        dict: Structured response with status, status_code, and data or error message.
+    """
+    try:
+        logger.info("Starting monthly variance calculation...")
+
+        # Step 1: Perform variance calculation
+        op = calculate_monthly_variance(request, config)
+        logger.debug(f"Variance calculation output: {op}")
+
+        # Step 2: Merge with LLM response
+        updated_result = merge_request(llm_response, op, config)
+        for data in updated_result["invoiceLineItemsResults"]:
+            if data["variance"]=="NA":
+                data["variance"]=""
+        logger.debug(f"Merged result: {updated_result}")
+
+        logger.info("Monthly variance calculation completed successfully.")
+
+        return {
+            "status": "success",
+            "status_code": 200,
+            "data": updated_result,
+        }
+
+    except Exception as e:
+        logger.exception("Error in main pipeline.")
+        return {
+            "status": "error",
+            "status_code": 400,
+            "message": f"Main pipeline failed: {e}",
+        }
+
