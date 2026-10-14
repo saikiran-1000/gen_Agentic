@@ -1,0 +1,452 @@
+import os
+import json
+import pickle
+import pandas as pd
+from io import BytesIO
+from training import training
+from azure.storage.blob import BlobServiceClient
+from azure.core.exceptions import ResourceNotFoundError
+from inference import process_inference
+import logging
+
+logger = logging.getLogger(__name__)
+blob_connection_string = os.getenv('AzureWebJobsStorage')
+
+def get_blob_service_client(blob_connection_string):
+    # Initialize BlobServiceClient
+    blob_client = BlobServiceClient.from_connection_string(blob_connection_string)
+    logger.info(f"blob_service_client, {blob_client}")
+    return blob_client
+def cast_value(val, dtype):
+    if pd.isna(val):
+        return None
+    try:
+        if dtype == 'string':
+            return str(val)
+        elif dtype == 'Float64':
+            return float(val)
+        elif dtype == 'Int64':
+            return int(val)
+        else:
+            return val
+    except Exception:
+        return None
+    
+def clean_numeric_columns(df, numeric_x_field, numeric_y_field):
+    numeric_columns = list(set(numeric_x_field + numeric_y_field))
+
+    for col in numeric_columns:
+        if col not in df.columns:
+            continue
+
+        original_values = df[col].astype(str)
+
+        no_commas = original_values.str.replace(",", "", regex=False)
+        def keep_last_dot(val):
+            parts = val.split('.')
+            if len(parts) <= 2:
+                return val
+            return ''.join(parts[:-1]) + '.' + parts[-1]
+
+        cleaned_values = no_commas.apply(keep_last_dot)
+        numeric_col = pd.to_numeric(cleaned_values, errors='coerce')
+
+        total = len(df)
+        num_invalid = numeric_col.isnull().sum()
+        percent_invalid = (num_invalid / total) * 100
+        tt=0.1
+        if percent_invalid > 2:
+            invalid_entries = df[col][numeric_col.isnull()].unique()
+            raise ValueError(
+                f"Column '{col}' has {percent_invalid:.2f}% invalid numeric entries after cleaning "
+                f"(more than {tt}% threshold). Invalid values: {invalid_entries.tolist()}"
+            )
+        df[col] = numeric_col
+        logging.info(f"Cleaned and validated numeric column: {col} ({100 - percent_invalid:.2f}% valid entries)")
+    return df
+
+
+def check_column_dtype(df, numeric_x_field, non_numeric_x_field, numeric_y_field, non_numeric_y_field):
+
+    for col in non_numeric_x_field + non_numeric_y_field:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: str(int(x)) if isinstance(x, float) and x.is_integer() else str(x))
+
+    for col in numeric_x_field + numeric_y_field:
+        if col in df.columns:
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                raise ValueError(f"Column '{col}' should be numeric (int/float), but has dtype {df[col].dtype}.")
+        else:
+            pass
+
+    for col in non_numeric_x_field + non_numeric_y_field:
+        if col in df.columns:
+            if not (
+                pd.api.types.is_string_dtype(df[col]) or
+                df[col].dtype == object or
+                pd.api.types.is_datetime64_any_dtype(df[col]) or
+                pd.api.types.is_bool_dtype(df[col])
+            ):
+                raise ValueError(f"Column '{col}' should be non-numeric (string/boolean/datetime), but has dtype {df[col].dtype}.")
+        else:
+            pass
+
+    expected_cols = set(numeric_x_field + numeric_y_field + non_numeric_x_field + non_numeric_y_field)
+    for col in df.columns:
+        if col not in expected_cols:
+            df[col] = df[col].astype(str)
+
+    return df
+
+
+def safe_split(val):
+    if isinstance(val, str) and '__' in val:
+        parts = val.split('__')
+        if len(parts) == 2:
+            return parts
+    return ['None', 'None']
+
+def check_train_or_test(blob_service_client,train_container_name, test_data,
+                        x_field, y_field,
+                        low_scope, high_scope, model_path,
+                        label_encoder_path, scope1_path,
+                        scope2_path,config,config_path,percent_to_train,coverage_percent,
+                        numeric_x_field, non_numeric_x_field, numeric_y_field,non_numeric_y_field,
+                        train_blob,replace_train_blob,non_empty_value_percent):
+
+    allowed_ext = ('.csv', '.xlsx', '.xls', '.xlsb')
+
+    ################################################################################################################
+    origin_container_name = train_blob
+    ################################################################################################################
+    origin_container_client = blob_service_client.get_container_client(origin_container_name)
+    blobs = list(origin_container_client.list_blobs())
+    valid_blobs = [blob for blob in blobs if blob.name.lower().endswith(allowed_ext)]
+    if not valid_blobs:
+        valid_blob = None
+        # raise ValueError("No training data found, proceeding with inferencing")
+    elif len(valid_blobs) > 1:
+        raise ValueError("Multiple training files found. Only one file is expected.")
+    else:
+        valid_blob = valid_blobs[0]
+        field_to_continue = []
+        if x_field:
+            field_to_continue.extend(x_field)
+        else:
+            raise ValueError("Please provide input fields (x_field).")
+
+        if y_field:
+            field_to_continue.extend(y_field)
+        else:
+            raise ValueError("Please provide label fields (y_field).")
+
+        if not field_to_continue:
+            raise ValueError("Field list is empty. Please provide fields to train.")
+
+        config["x_field"] = x_field
+        config["y_field"] = y_field
+        origin_blob_client = origin_container_client.get_blob_client(valid_blob.name)
+        blob_bytes = origin_blob_client.download_blob().readall()
+        stream = BytesIO(blob_bytes)
+        ext = valid_blob.name.split('.')[-1].lower()
+        try:
+            if ext == 'csv':
+                logging.info("Loading a .csv file.")
+                df = pd.read_csv(stream, encoding='utf-8')
+                col_list1 = list(df.columns)
+                miss_list1 = [field for field in field_to_continue if field not in col_list1]
+                if miss_list1:
+                    raise ValueError(f"Fields missing in the dataset: {', '.join(miss_list1)}")
+                df = df[field_to_continue]
+            elif ext in ['xlsx', 'xls']:
+                logging.info("Loading a .xlsx or .xls file.")
+                df = pd.read_excel(stream, engine='openpyxl')
+                col_list1 = list(df.columns)
+                miss_list1 = [field for field in field_to_continue if field not in col_list1]
+                if miss_list1:
+                    raise ValueError(f"Fields missing in the dataset: {', '.join(miss_list1)}")
+                df = df[field_to_continue]
+            elif ext == 'xlsb':
+                logging.info("Loading a .xlsb file.")
+                import pyxlsb
+                df = pd.read_excel(stream, engine='pyxlsb')
+                col_list1 = list(df.columns)
+                miss_list1 = [field for field in field_to_continue if field not in col_list1]
+                if miss_list1:
+                    raise ValueError(f"Fields missing in the dataset: {', '.join(miss_list1)}")
+                df = df[field_to_continue]
+            else:
+                raise ValueError("Unsupported file extension.")
+        except Exception as e:
+            raise ValueError(f"Error loading {valid_blob.name}: {e}")
+        logging.info("Loading Training data is done.")
+        dest_container_name = replace_train_blob
+        dest_blob_client = blob_service_client.get_blob_client(dest_container_name, valid_blob.name)
+        dest_blob_client.start_copy_from_url(origin_blob_client.url)
+        origin_blob_client.delete_blob()
+
+        logging.info(f"Copied {valid_blob.name} to {dest_container_name} and deleted from original container.")
+        df=clean_numeric_columns(df,numeric_x_field,numeric_y_field)
+        check_column_dtype(df, numeric_x_field, non_numeric_x_field, numeric_y_field, non_numeric_y_field)
+        logging.info("Field name data type checking is done, proceeding for Training")
+        for col in non_numeric_x_field+non_numeric_y_field:
+            if col in list(df.columns):
+                df[col] = df[col].astype(str).str.strip()
+        training(blob_service_client,train_container_name,df,x_field, y_field, low_scope, high_scope, config, config_path,percent_to_train,coverage_percent,scope1_path,scope2_path,model_path,label_encoder_path,non_empty_value_percent)
+    ##################################################### BLOB STORAGE ###################################################
+    blob_client = blob_service_client.get_blob_client(container=train_container_name, blob=config_path)
+
+    try:
+        # Attempt to download blob content
+        download_stream = blob_client.download_blob()
+        config_parameters = json.loads(download_stream.readall())
+        logging.info("Config loaded successfully:")
+
+    except ResourceNotFoundError:
+        raise FileNotFoundError(f"Blob '{config_path}' not found in container '{train_container_name}'")
+    ######################################################################################################################
+
+    to_drop=config_parameters["to_drop"]
+    best_combo=config_parameters["best_combo"]
+    if len(test_data)==0:
+        raise ValueError("No data found for inferencing.")
+
+    missing = [
+        (k, [col for col in x_field if col not in v])
+        for k, v in test_data.items()
+        if not all(col in v for col in x_field)
+    ]
+
+    lines_with_missing_detail = [item[0] for item in missing]
+
+    filtered_json_dict = {
+        k: {col: v[col] for col in x_field if col in v}
+        for k, v in test_data.items()
+        if k not in lines_with_missing_detail
+    }
+
+    df_reconstructed = pd.DataFrame(list(filtered_json_dict.values()))
+    df_reconstructed=clean_numeric_columns(df_reconstructed,numeric_x_field,numeric_y_field)
+    df_reconstructed=check_column_dtype(df_reconstructed, numeric_x_field, non_numeric_x_field, numeric_y_field, non_numeric_y_field)
+    for col in non_numeric_x_field+non_numeric_y_field:
+        if col in list(df_reconstructed.columns):
+            df_reconstructed[col] = df_reconstructed[col].astype(str).str.strip()
+    final_data=process_inference(blob_service_client,train_container_name,df_reconstructed,model_path,label_encoder_path,scope1_path,scope2_path,x_field,y_field,best_combo,to_drop,non_numeric_x_field , non_numeric_y_field)
+    final_data[y_field] = final_data['gl__cc'].apply(safe_split).apply(pd.Series)
+    logging.info("Prediction splitted.")
+    final_data.drop(columns=['gl__cc'], inplace=True)
+
+    col_dtype_dict=config_parameters["column dtype"]
+    flag=0
+    ##################################################### BLOB STORAGE ###################################################
+    blob_client = blob_service_client.get_blob_client(container=train_container_name, blob=label_encoder_path)
+
+    try:
+        # Download blob content into memory
+        download_stream = blob_client.download_blob()
+        label_encoders_bytes = download_stream.readall()
+        label_encoders = pickle.loads(label_encoders_bytes)
+        logging.info("Label encoder loaded successfully.")
+
+    except ResourceNotFoundError:
+        raise FileNotFoundError(f"Blob '{label_encoder_path}' does not exist in container '{train_container_name}'.")
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to load the label_encoder from {train_container_name} due to: {str(e)}")
+    #########################################################################################################
+    final_data = final_data.copy()
+    final_data["__original_index__"] = range(len(final_data))
+
+    mask = final_data[y_field].eq("None").any(axis=1)
+
+    part_with_none = final_data[mask].copy()
+    part_without_none = final_data[~mask].copy()
+    for name in col_dtype_dict:
+        if name in y_field:
+            if name in label_encoders:
+                encoder = label_encoders[name]
+                valid_indices = set(range(len(encoder.classes_)))
+                part_without_none[name] = part_without_none[name].apply(lambda x: encoder.inverse_transform([int(float(x))])[0] if float(x).is_integer() and int(float(x)) in valid_indices else x)
+
+    final_data = pd.concat([part_with_none, part_without_none], ignore_index=True)
+    final_data = final_data.sort_values(by="__original_index__").reset_index(drop=True)
+    final_data.drop(columns="__original_index__", inplace=True)
+
+    for col, dtype in col_dtype_dict.items():
+        try:
+            if col in y_field:
+                # Replace 'None' with pd.NA explicitly for y_field
+                final_data[col] = final_data[col].replace("None", -1)
+            # Now apply the dtype conversion
+            if 'int' in dtype.lower():
+                final_data[col] = pd.to_numeric(final_data[col], errors='coerce').astype('Int64')
+            elif 'float' in dtype.lower():
+                final_data[col] = pd.to_numeric(final_data[col], errors='coerce')
+            elif dtype == 'boolean':
+                final_data[col] = final_data[col].astype('boolean')
+            elif dtype == 'string':
+                final_data[col] = final_data[col].astype('string')
+            else:
+                final_data[col] = final_data[col].astype(dtype)
+        except Exception as e:
+            logging.info(f"Warning: Could not convert column '{col}' to {dtype} due to: {e}")
+    tempdf = final_data[y_field + ["confidence_score"]]
+    return_list = []
+    valid_idx = 0
+    logging.info("Response handling.")
+    for key in test_data:
+        if key in lines_with_missing_detail:
+            return_list.append({
+                "Success": "False",
+                "ID": key,
+                "error": "Missing required columns",
+                "missing_fields": [col for col in x_field if col not in test_data[key]]
+            })
+        else:
+            row = tempdf.iloc[valid_idx]
+            if row["confidence_score"] == 0:
+                return_list.append({
+                    "Success": "False",
+                    "ID": key,
+                    "error": "Code not predicted"
+                })
+            else:
+                dict1 = {
+                    "Success": "True",
+                    "ID": key,
+                    **{
+                        col: {
+                            "field_value": cast_value(
+                                val.item() if hasattr(val, "item") else val,
+                                col_dtype_dict.get(col, 'string')
+                            ),
+                            "confidence_score": round(row["confidence_score"].item()*100,2)
+                            if hasattr(row["confidence_score"], "item")
+                            else row["confidence_score"]
+                        }
+                        for col, val in row[y_field].items()
+                    }
+                }
+                return_list.append(dict1)
+            valid_idx += 1 
+
+    logging.info("Final answer generated.")
+    return return_list
+
+blob_service_client = get_blob_service_client(blob_connection_string)
+
+def transform_data(data, mapping):
+    transformed_data = {}
+
+    for key, value in data.items():
+        value = json.loads(value)
+
+        transformed_entry = {}
+
+        # Pull only mapped keys
+        for new_key, original_key in mapping.items():
+            if original_key in value:
+                transformed_entry[new_key] = value[original_key]
+
+        transformed_data[key] = transformed_entry
+
+    logging.info("Mapping of data done.")
+    return transformed_data
+
+def main(test_data): ## test_data
+    
+    try:
+        config={}
+        lob_client = blob_service_client.get_blob_client(container="config", blob="configurable.json")
+        blob_data = lob_client.download_blob()
+        # Read the blob data as bytes
+        blob_bytes = blob_data.readall()
+        # Decode bytes to string if needed
+        blob_content = blob_bytes.decode("utf-8")
+        config_input = json.loads(blob_content)
+        train_blob = config_input["train_blob"]
+        replace_train_blob = config_input["replace_train_blob"]
+        training_file_storage = config_input["training_file_storage"]
+        non_empty_value_percent=config_input["non_empty_value_percent"]
+        percent_to_train = config_input["percent_to_train"]
+        coverage_percent = config_input["coverage_percent"]
+        x_field_input = config_input["x_field_input"]
+        y_field_input = config_input["y_field_input"]
+        numeric_in_x_field = config_input["numeric_in_x_field"]
+        numeric_in_y_field = config_input["numeric_in_y_field"]
+        mapping=config_input["mapping"]
+        logging.info(f"Information successfully extracted from configurable.json")
+        test_data = transform_data(test_data, mapping)
+        if not (0 <= percent_to_train <= 100):
+            raise ValueError("percent_to_train is out of range, it must be between 0 and 100.")
+
+        if not (0 <= coverage_percent <= 100):
+            raise ValueError("coverage_percent is out of range, it must be between 0 and 100.")
+        x_field = [col.strip() for col in x_field_input.split(',')]
+        y_field = [col.strip() for col in y_field_input.split(',')]
+        numeric_x_field = [col.strip() for col in numeric_in_x_field.split(',')] if numeric_in_x_field != "null" else []
+        non_numeric_x_field=[item for item in x_field if item not in numeric_x_field]
+        numeric_y_field = [col.strip() for col in numeric_in_y_field.split(',')] if numeric_in_y_field != "null" else []
+        non_numeric_y_field=[item for item in y_field if item not in numeric_y_field]
+        combined_x_fields = numeric_x_field + non_numeric_x_field
+        combined_y_fields = numeric_y_field + non_numeric_y_field
+
+        missing_x_fields = []
+        missing_y_fields = []
+        for col in x_field:
+            if col not in combined_x_fields:
+                missing_x_fields.append(col)
+        for col in y_field:
+            if col not in combined_y_fields:
+                missing_y_fields.append(col)
+        if missing_x_fields:
+            raise ValueError(f"No info regarding type of these field from x_field_input: {', '.join(missing_x_fields)}")
+        if missing_y_fields:
+            raise ValueError(f"No info regarding type of these field from y_field_input: {', '.join(missing_y_fields)}")
+
+        low_scope = 2
+        high_scope = 3
+        ################################################################################################################################
+        train_container_name = training_file_storage
+
+        container_client = blob_service_client.get_container_client(train_container_name)
+        blobs_list = container_client.list_blobs()
+        logging.info("BLOB CREATED : ")
+        # for blob in blobs_list:
+        #     print(blob.name)
+        try:
+            container_client.get_container_properties()
+            logging.info(f"Container '{train_container_name}' already exists.")
+        except Exception as e:
+            logging.info(f"Container '{train_container_name}' does not exist. Creating now...")
+            container_client = blob_service_client.create_container(train_container_name)
+        #################################################################################################################################
+        # Inference parameters
+        model_path = "model1.pkl"
+        label_encoder_path = "label_encoder.pkl"
+        scope1_path = "scope1.csv"
+        scope2_path = "scope2.csv"
+        config_path="training_config.json"
+        logging.info(f'Setup done for Training or Inferencing')
+        return_list=check_train_or_test(
+            blob_service_client,train_container_name, test_data,
+            x_field, y_field,
+            low_scope, high_scope, model_path,
+            label_encoder_path, scope1_path,
+            scope2_path, config, config_path,percent_to_train,coverage_percent,
+            numeric_x_field, non_numeric_x_field, numeric_y_field,non_numeric_y_field,
+            train_blob,replace_train_blob,non_empty_value_percent
+        )
+        return return_list
+    except ValueError as ve:
+        logging.error(f"Expected error: {ve}")
+        return {"error": str(ve), "status_code": 400}
+    except FileNotFoundError as fe:
+        logging.error(f"Expected error: {fe}")
+        return {"error": str(fe), "status_code": 404}
+    except RuntimeError as re:
+        logging.error(f"Expected error: {re}")
+        return {"error": str(re), "status_code": 500}
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        return {"error": f"Unexpected error: {str(e)}", "status_code": 500}
