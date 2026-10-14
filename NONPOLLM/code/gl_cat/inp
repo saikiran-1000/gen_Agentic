@@ -1,0 +1,139 @@
+"""Input validation module for Non-PO Invoice Coding for GL Category Identification.  
+This module provides comprehensive input validation for invoice Non-PO Coding using Pydantic models.  
+It ensures data integrity and schema compliance for invoice-related operations."""  
+
+import logging 
+from typing import Dict, List, Any  
+from pydantic import BaseModel, Field, ValidationError  
+  
+CONFIG: Dict[str, Any] = {  
+    "LLM_to_salesforce_key_mapping": {},  
+    "LLM_to_History_key_mapping": {}  
+}  
+
+logger = logging.getLogger(__name__)
+
+def pydantic_classes(config: Dict[str, Any]) -> None:  
+    """  
+    Dynamically generates Pydantic classes for validating invoice data based on the provided configuration.  
+  
+    Args:  
+        config (Dict[str, Any]): Configuration dictionary containing key mappings.  
+  
+    Returns:  
+        InvoiceData (BaseModel): Pydantic model for invoice data validation.  
+    """  
+    CONFIG.update(config)  
+  
+    class InvoiceLineItems(BaseModel):  
+        """  
+        Represents a single invoice line item with identifier and description.  
+  
+        Attributes:  
+            invoiceLineID (str): Unique identifier for the invoice line item.  
+            lineDescription (str): Descriptive name of the line item.  
+        """  
+        invoiceLineID: str = Field(  
+            ...,   
+            description="Unique identifier for the invoice line item",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("invoiceLineID")  
+        )  
+        lineDescription: str = Field(  
+            ...,   
+            description="Descriptive name of the line item",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("lineDescription")  
+        )  
+  
+    class GLMaster(BaseModel):  
+        """  
+        Represents a GL master category.  
+  
+        Attributes:  
+            glCategory (str): GL category from the master data.  
+            glCategoryExplanation (str): Short description of the GL category.  
+        """  
+        glCategory: str = Field(  
+            ...,  
+            description="GL category from the master data",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("glCategory")  
+        )  
+        glCategoryExplanation: str = Field(  
+            ...,  
+            description="Short description to explain what type of expense goes into that GL category",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("glCategoryExplanation")  
+        )  
+  
+    class InvoiceData(BaseModel):  
+        """  
+        Represents the full invoice data including master GL categories and line items.  
+  
+        Attributes:  
+            invoiceID (str): Unique identifier for the invoice.  
+            invoiceDate (str): Date of the invoice.  
+            approverName (str): Name of the approver.  
+            vendorID (str): Unique identifier for the vendor.  
+            masterGLCategories (List[GLMaster]): List of GL categories.  
+            invoiceLineItems (List[InvoiceLineItems]): List of invoice line items.  
+        """  
+        invoiceID: str = Field(  
+            ...,   
+            description="Unique identifier for the invoice",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("invoiceID")  
+        )  
+        invoiceDate: str = Field(  
+            ...,   
+            description="Date of the invoice",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("invoiceDate")  
+        )  
+        approverName: str = Field(  
+            ...,   
+            description="Name of the approver of the invoice",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("approverName")  
+        )  
+        vendorID: str = Field(  
+            ...,   
+            description="Unique identifier for the vendor",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("vendorID")  
+        )  
+        masterGLCategories: List[GLMaster] = Field(  
+            ...,  
+            description="Unique list of GL categories present in master data",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("glMaster")  
+        )  
+        invoiceLineItems: List[InvoiceLineItems] = Field(  
+            ...,  
+            min_items=1,  
+            description="List of line items in the invoice",  
+            alias=CONFIG.get("LLM_to_salesforce_key_mapping").get("invoiceLineItems")  
+        )  
+  
+    return InvoiceData  
+  
+def input_validation(invoice_non_po_details: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:   
+    """  
+    Validates the input invoice data for Non-PO Coding using dynamic Pydantic models.  
+  
+    Args:  
+        invoice_non_po_details (Dict[str, Any]): Input invoice data.  
+        config (Dict[str, Any]): Configuration for key mappings.  
+  
+    Returns:  
+        Dict[str, Any]: Validated invoice data as a dictionary.  
+  
+    Raises:  
+        ValueError: If input data fails schema validation.  
+    """  
+    logger.info("Starting input validation for Non-PO invoice data for GL Category Identification.")
+    try:  
+        # Validate and parse the data  
+        InvoiceData = pydantic_classes(config)  
+        validated_model = InvoiceData(**invoice_non_po_details)  
+        logger.info("Input validation successful for GL Category Identification.")
+        # Convert to dict using field names (not aliases)  
+        return validated_model.model_dump(by_alias=False)  
+    except ValidationError as validation_error:  
+        error_message = (  
+            "##NON-PO-CODING-GL-CATEGORIES-IDENTIFICATION-ERROR## Input JSON Schema Validation Error: "  
+            f"{validation_error}"  
+        )   
+        raise ValueError(error_message) from validation_error  
