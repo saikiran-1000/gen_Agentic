@@ -1,0 +1,314 @@
+# llm_result={
+#         "invoiceID": "a0zIm000000Pd14IAC",
+#         "invoiceLineItemsResults": [
+#             {
+#                 "invoiceLineID": "a0xIm000000DL6yIAG",
+#                 "taxCodeRecommendation": "AU AP ECO VEHICLE",
+#                 "justification": "Historical entry 'Eco Vehicle/Panel Repairs' is semantically aligned with 'Eco Vehicle' and the master contains 'AU AP ECO VEHICLE'; the 06/09/2019 record is the most recent relevant match and more relevant than the 'Solar Panel' code."
+#             },
+#             {
+#                 "invoiceLineID": "a0xIm000000DL70IAG",
+#                 "taxCodeRecommendation": "AU AP ECO VEHICLE, AU AP SOLAR PANEL HIST",
+#                 "justification": "Historical entry references both 'Panel' and 'Eco Vehicle', matching both master codes; the most recent matched date (06/09/2019) and repeatOccurances are identical, so both are indistinguishable."
+#             },
+#             {
+#                 "invoiceLineID": "a0xIm000000DL6zIAG",
+#                 "taxCodeRecommendation": "AU AP ECO VEHICLE",
+#                 "justification": "Historical item 'Eco Vehicle/Panel Repairs/Brisbane' is the closest semantic match (06/09/2019). AU AP ECO VEHICLE from the master list directly corresponds to eco/vehicle bodywork; no other master code is similarly relevant."
+#             }
+#         ]
+#     }
+# result1_data={
+#         "invoiceID": "a0zIm000000Pd14IAC",
+#         "companyCountry": "Australia",
+#         "companyCode": "AU15",
+#         "vendorNumber": "315",
+#         "vendorCountry": "Australia",
+#         "invoiceDate": "2019-06-09",
+#         "invoiceLineItems": [
+#             {
+#                 "invoiceLineID": "a0xIm000000DL6yIAG",
+#                 "lineItemDescription": "Eco Sedan/Panel Restoration/Sydney",
+#                 "taxPercent": "5.00",
+#                 "taxType": "VAT",
+#                 "taxMasterDataLineItems": [
+#                     {
+#                         "taxPercent": "5.00",
+#                         "companyCountry": "Australia",
+#                         "taxCode": "AU AP ECO VEHICLE",
+#                         "taxCodeDescription": "Eco-friendly vehicles taxed at reduced GST"
+#                     },
+#                     {
+#                         "taxPercent": "5.00",
+#                         "companyCountry": "Australia",
+#                         "taxCode": "AU AP SOLAR PANEL HIST",
+#                         "taxCodeDescription": "Solar panels taxed at reduced GST (historical)"
+#                     }
+#                 ],
+#                 "historicalData": [
+#                     {
+#                         "invoiceLineID": "INVL-20000060",
+#                         "invoiceDate": "2019-05-09",
+#                         "lineItemDescription": "Eco Vehicle/Panel Repairs/Brisbane",
+#                         "companyCode": "AU15",
+#                         "invoiceID": "INV-30000012",
+#                         "companyCountry": "Australia",
+#                         "vendorNumber": "315",
+#                         "vendorCountry": "Australia",
+#                         "taxPercent": "5",
+#                         "taxCode": "AU AP ECO VEHICLE",
+#                         "vendorClusterDescription": "Eco/Panel",
+#                         "score": "79.80"
+#                     },
+#                     {
+#                         "invoiceLineID": "INVL-200000",
+#                         "invoiceDate": "2019-04-09",
+#                         "lineItemDescription": "Eco Vehicle/Panel Repairs/Brisbane",
+#                         "companyCode": "AU15",
+#                         "invoiceID": "INV-30000012",
+#                         "companyCountry": "Australia",
+#                         "vendorNumber": "315",
+#                         "vendorCountry": "Australia",
+#                         "taxPercent": "5",
+#                         "taxCode": "AU AP ECO",
+#                         "vendorClusterDescription": "Eco/Panel",
+#                         "score": "90"
+#                     }
+#                 ],
+#                 "result": {
+#                     "status": "success",
+#                     "status_code": 200,
+#                     "data": {
+#                         "invoiceID": "a0zIm000000Pd14IAC",
+#                         "invoiceLineItemsResults": [
+#                             {
+#                                 "invoiceLineID": "a0xIm000000DL6yIAG",
+#                                 "taxCodeRecommendation": "AU AP ECO VEHICLE",
+#                                 "justification": "Historical entry 'Eco Vehicle/Panel Repairs' is semantically aligned with 'Eco Vehicle' and the master contains 'AU AP ECO VEHICLE'; the 06/09/2019 record is the most recent relevant match and more relevant than the 'Solar Panel' code."
+#                             }
+#                         ]
+#                     }
+#                 }
+#             },
+#             {
+#                 "invoiceLineID": "a0xIm000000DL6zIAG",
+#                 "lineItemDescription": "Hybrid Car Bodywork Service/Sydney",
+#                 "taxPercent": "5.00",
+#                 "taxType": "VAT",
+#                 "taxMasterDataLineItems": [
+#                     {
+#                         "taxPercent": "5.00",
+#                         "companyCountry": "Australia",
+#                         "taxCode": "AU AP ECO VEHICLE",
+#                         "taxCodeDescription": "Eco-friendly vehicles taxed at reduced GST"
+#                     },
+#                     {
+#                         "taxPercent": "5.00",
+#                         "companyCountry": "Australia",
+#                         "taxCode": "AU AP SOLAR PANEL HIST",
+#                         "taxCodeDescription": "Solar panels taxed at reduced GST (historical)"
+#                     }
+#                 ],
+#                 "historicalData": [
+#                     {
+#                         "invoiceLineID": "INVL-20000060",
+#                         "invoiceDate": "06/09/2019",
+#                         "lineItemDescription": "Eco Vehicle/Panel Repairs/Brisbane",
+#                         "companyCode": "AU15",
+#                         "invoiceID": "INV-30000012",
+#                         "companyCountry": "Australia",
+#                         "vendorNumber": "315",
+#                         "vendorCountry": "Australia",
+#                         "taxPercent": "5",
+#                         "taxCode": "AU AP ECO VEHICLE",
+#                         "vendorClusterDescription": "Eco/Panel",
+#                         "score": "70.65"
+#                     }
+#                 ],
+#                 "result": {
+#                     "status": "success",
+#                     "status_code": 200,
+#                     "data": {
+#                         "invoiceID": "a0zIm000000Pd14IAC",
+#                         "invoiceLineItemsResults": [
+#                             {
+#                                 "invoiceLineID": "a0xIm000000DL6zIAG",
+#                                 "taxCodeRecommendation": "AU AP ECO VEHICLE",
+#                                 "justification": "Historical item 'Eco Vehicle/Panel Repairs/Brisbane' is the closest semantic match (06/09/2019). AU AP ECO VEHICLE from the master list directly corresponds to eco/vehicle bodywork; no other master code is similarly relevant."
+#                             }
+#                         ]
+#                     }
+#                 }
+#             },
+#             {
+#                 "invoiceLineID": "a0xIm000000DL70IAG",
+#                 "lineItemDescription": "Solar Inverter Supply and Mounting",
+#                 "taxPercent": "5.00",
+#                 "taxType": "VAT",
+#                 "taxMasterDataLineItems": [
+#                     {
+#                         "taxPercent": "5.00",
+#                         "companyCountry": "Australia",
+#                         "taxCode": "AU AP ECO VEHICLE",
+#                         "taxCodeDescription": "Eco-friendly vehicles taxed at reduced GST"
+#                     },
+#                     {
+#                         "taxPercent": "5.00",
+#                         "companyCountry": "Australia",
+#                         "taxCode": "AU AP SOLAR PANEL HIST",
+#                         "taxCodeDescription": "Solar panels taxed at reduced GST (historical)"
+#                     }
+#                 ],
+#                 "historicalData": [
+#                     {
+#                         "invoiceLineID": "INVL-20000060",
+#                         "invoiceDate": "06/09/2019",
+#                         "lineItemDescription": "Eco Vehicle/Panel Repairs/Brisbane",
+#                         "companyCode": "AU15",
+#                         "invoiceID": "INV-30000012",
+#                         "companyCountry": "Australia",
+#                         "vendorNumber": "315",
+#                         "vendorCountry": "Australia",
+#                         "taxPercent": "5",
+#                         "taxCode": "AU AP ECO VEHICLE",
+#                         "vendorClusterDescription": "Eco/Panel",
+#                         "score": "58.84"
+#                     }
+#                 ],
+#                 "result": {
+#                     "status": "success",
+#                     "status_code": 200,
+#                     "data": {
+#                         "invoiceID": "a0zIm000000Pd14IAC",
+#                         "invoiceLineItemsResults": [
+#                             {
+#                                 "invoiceLineID": "a0xIm000000DL70IAG",
+#                                 "taxCodeRecommendation": "AU AP ECO VEHICLE, AU AP SOLAR PANEL HIST",
+#                                 "justification": "Historical entry references both 'Panel' and 'Eco Vehicle', matching both master codes; the most recent matched date (06/09/2019) and repeatOccurances are identical, so both are indistinguishable."
+#                             }
+#                         ]
+#                     }
+#                 }
+#             }
+#         ]
+#     }
+
+from datetime import datetime
+import logging
+logger = logging.getLogger(__name__)
+
+def parse_date(date_str):
+    """Parse date safely from multiple common formats."""
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            pass
+    raise ValueError(f"Unknown date format: {date_str}")
+
+def confidence_score(llm_result, result1_data, config):
+    logger.info("Starting confidence score calculation...")
+    try:
+        for invl in llm_result.get("invoiceLineItemsResults"):
+            inv_id=invl.get("invoiceLineID")
+            if not inv_id:
+                inv_id=invl.get(config.get("AzureAIConfig").get("key_field"))
+
+            for nestinvl in result1_data.get(config.get("line_detail_identifier_in_input")):
+                if nestinvl.get(config.get("AzureAIConfig").get("key_field"))==inv_id:
+                    hist_data_list=nestinvl.get("historicalData")
+                    withoutRuleCodes = nestinvl.get(config.get("salesforce_to_icd_mapping").get("line_detail").get("withoutRuleCodes"))
+                    # print("#"*30)
+                    # print(hist_data_list)
+                    freq_score={}
+                    for hd in hist_data_list:
+                        if hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code")) not in freq_score:
+                            freq_score[hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code"))]=1
+                        else:
+                            freq_score[hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code"))]+=1
+                        
+
+                    if len(hist_data_list)!=0:
+                        for key, value in freq_score.items():
+                            freq_score[key]=freq_score[key]/len(hist_data_list)
+                    # print(f"Freq for invl: {inv_id}: {freq_score}")
+
+                    for hdata in hist_data_list:
+                        overall_score={}
+                        overall_score["score"]= float(hdata.get("score"))/100.0
+                        temp_cn=config.get("field_to_match_for_confidence_score")
+                        flag=0
+                        for key,value in temp_cn.items():
+                            if hdata.get(value)==result1_data.get(value):
+                                flag=1
+                            else:
+                                flag=0
+                        overall_score["param_match"]=flag
+                        overall_score["freq_score"]=freq_score.get(hdata.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code")),0)
+                        # Read values
+                        start_date_str = result1_data.get("invoiceDate", "2000-01-01")
+                        end_date_str = hdata.get("invoiceDate", "06/09/1990")
+                        # Parse
+                        start_date = parse_date(start_date_str)
+                        end_date = parse_date(end_date_str)
+
+                        # print("Start date: ", start_date)
+                        # print("End date: ", end_date)
+                        # Calculate difference in days
+                        days_gap = (start_date - end_date).days
+                        import math
+                        # print(days_gap)
+                        # print(type(days_gap))
+                        recency = 0
+                        if days_gap>=0: 
+                            recency = math.exp((-1)*config.get("k_r_coefficient_for_recency_calculation") * days_gap)
+                        overall_score["recency_score"]=recency
+
+                        logger.info(f"Overall Score:{ overall_score}")
+                        weight_config=config.get("weightage_for_confidence_score_calculation")
+                        final_score=weight_config.get("score")*overall_score["score"]+weight_config.get("param_match")*overall_score["param_match"]+weight_config.get("w_freq")*overall_score["freq_score"]+weight_config.get("w_recency")*overall_score["recency_score"]
+                        hdata["confidence_score"]=final_score
+                    # print("Historical Data: ", hist_data_list)
+                    max_score={}
+                    # avg_score={}
+                    total_score=0
+                    if config.get("max_to_choose").lower()=="yes":
+                        for hd in hist_data_list:
+                            if hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code")) not in max_score:
+                                max_score[hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code"))]=hd.get("confidence_score")
+                            else:
+                                max_score[hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code"))]=max(max_score[hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code"))],hd.get("confidence_score"))
+                    else:
+                        for hd in hist_data_list:
+                            total_score+=hd.get("confidence_score")
+                            if hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code")) not in max_score:
+                                max_score[hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code"))]=hd.get("confidence_score")
+                            else:
+                                max_score[hd.get(config.get("salesforce_to_icd_mapping").get("tax_master").get("Tax Code"))]+=hd.get("confidence_score")
+                            
+                            # print("#"*50)
+                            # print("Max Score", max_score)
+                        for key, val in max_score.items():
+                            max_score[key]=val/total_score
+
+                    final_score = max_score.get(invl.get("taxCodeRecommendation"),0)*100
+                    # invl["final_score"] = final_score
+                    # invl["WRC"] = str(withoutRuleCodes)
+                    if str(withoutRuleCodes).lower() == "true":
+                        final_score=final_score*config.get("withoutRuleCodes_threshold")
+                    final_score = round(final_score,2)
+                    logger.info(f"Invl: {inv_id}, Confidence Score: {final_score}")
+                    invl["Confidence_score"]=final_score
+        return llm_result
+    except Exception as e:
+        logger.error(f"Error in confidence score calculation: {e}")
+        raise ValueError(f"Error in calculating confidence score: {e}")
+
+# print(confidence_score(llm_result, result1_data, config))
+
+
+
+
+
+
+
