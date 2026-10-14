@@ -1,0 +1,186 @@
+"""Historical Analysis Metrics Module for GRN Variance Analysis.
+
+This module performs statistical analysis on historical GRN variance data to generate insights for AI-powered recommendations. It calculates variance metrics, percentiles, and monthly trends for line item analysis.
+"""
+
+import json
+import statistics
+from typing import Dict, Any
+import logging
+
+import pandas as pd
+
+
+logger = logging.getLogger(__name__)
+
+
+def historical_analysis_metrics(line_item_data: Dict[str, Any]) -> str:
+    """Calculate statistical metrics for historical GRN variance data.
+
+    Computes variance statistics, percentiles, and monthly trends from historical invoice/GRN data to support AI-powered variance analysis.
+
+    Args:
+        line_item_data (Dict): Contains 'historicalData' key with list of historical records
+
+    Returns:
+        str: JSON string containing statistical summary with variance metrics and trends
+    """
+    logger.info("Starting historical analysis metrics calculation")
+    
+    # Month mapping for monthly analysis
+    MONTH_MAPPING = {
+        1: "January", 2: "February", 3: "March", 4: "April", 5: "May", 6: "June", 7: "July", 8: "August", 9: "September", 10: "October", 11: "November", 12: "December"
+    }
+
+    historical_data = line_item_data.get("historicalData")
+    logger.info(f"Processing {len(historical_data)} historical records")
+
+    # Calculate GRN variance percentage for each historical record
+    for record in historical_data:
+        record["grnVariancePercent"] = abs(round(((record["grnQuantity"] - record["invoiceQuantity"])/record["grnQuantity"])*100, 2)if record["grnQuantity"] != 0 else 0)
+
+    record_count = len(historical_data)
+    grn_variance_list = [record["grnVariancePercent"] for record in historical_data]
+
+    if record_count == 1:
+        statistical_summary = {
+            "nHistoricalRecords": record_count,
+            "grnVarianceMean": grn_variance_list[0],
+            "grnVariancePercentiles": {
+                "p5": None,
+                "p25": None,
+                "p50": None,
+                "p75": None,
+                "p95": None,
+            },
+            "grnVarianceMin": grn_variance_list[0],
+            "grnVarianceMax": grn_variance_list[0],
+            "grnVarianceMonthWise": {}
+        }
+        invoice_month_num = pd.to_datetime(historical_data[0]["invoiceDate"]).month
+        invoice_month_name = MONTH_MAPPING[invoice_month_num]
+        for month in MONTH_MAPPING.values():
+            if month == invoice_month_name:
+                statistical_summary["grnVarianceMonthWise"][month] = {
+                    "grn_variance_monthly_quantiles": {
+                        "p5": None,
+                        "p25": None,
+                        "p50": None,
+                        "p75": None,
+                        "p95": None,
+                    },
+                    "grn_variance_monthly_max": grn_variance_list[0],
+                    "count": 1,
+                }
+            else:
+                statistical_summary["grnVarianceMonthWise"][month] = {
+                    "grn_variance_monthly_quantiles": {
+                        "p5": None,
+                        "p25": None,
+                        "p50": None,
+                        "p75": None,
+                        "p95": None,
+                    },
+                    "grn_variance_monthly_max": None,
+                    "count": 0
+                }
+    else:
+        logger.info("Multiple historical records detected, calculating comprehensive statistics")
+
+        try:
+            logger.debug("Calculating overall variance statistics")
+            # Calculate overall statistical metrics
+            grn_variance_mean = round(statistics.mean(grn_variance_list), 2)
+            grn_variance_percentiles = {
+                "p5": round(statistics.quantiles(grn_variance_list, n=100, method='inclusive')[4], 2), #5th Percentile
+                "p25": round(statistics.quantiles(grn_variance_list, n=100, method='inclusive')[24], 2), #25th Percentile
+                "p50": round(statistics.quantiles(grn_variance_list, n=100, method='inclusive')[49], 2), #50th Percentile
+                "p75": round(statistics.quantiles(grn_variance_list, n=100, method='inclusive')[74], 2), #75th Percentile
+                "p95": round(statistics.quantiles(grn_variance_list, n=100, method='inclusive')[94], 2), #95th Percentile
+            }
+            grn_variance_min = round(min(grn_variance_list), 2)
+            grn_variance_max = round(max(grn_variance_list), 2)
+
+            # Calculate month-wise variance statistics
+            logger.debug("Calculating month-wise variance statistics")
+            grn_variance_month_wise = {}
+            for key, month in MONTH_MAPPING.items():
+                month_records = [record for record in historical_data if pd.to_datetime(record["invoiceDate"]).month == key]
+                grn_variance_monthly_list = [record["grnVariancePercent"] for record in month_records]
+                
+                count_val = len(month_records)
+                
+                # Calculate quantiles only if we have more than 1 record
+                if count_val > 1:
+                    quantiles_data = statistics.quantiles(grn_variance_monthly_list, n=100, method='inclusive')
+                    grn_variance_monthly_quantiles = {
+                        "p5": round(quantiles_data[4], 2),
+                        "p25": round(quantiles_data[24], 2),
+                        "p50": round(quantiles_data[49], 2),
+                        "p75": round(quantiles_data[74], 2),
+                        "p95": round(quantiles_data[94], 2),
+                    }
+                    grn_variance_monthly_max = round(max(grn_variance_monthly_list), 2)
+                else:
+                    # Quantiles not calculable for 0 or 1 records
+                    grn_variance_monthly_quantiles = {
+                        "p5": None,
+                        "p25": None,
+                        "p50": None,
+                        "p75": None,
+                        "p95": None,
+                    }
+                    grn_variance_monthly_max = grn_variance_monthly_list[0] if count_val == 1 else None
+
+                grn_variance_month_wise[month] = {
+                    "grn_variance_monthly_quantiles": grn_variance_monthly_quantiles,
+                    "grn_variance_monthly_max": grn_variance_monthly_max,
+                    "count": count_val
+                }
+            
+            logger.info("Month-wise statistics calculated successfully")
+
+        except statistics.StatisticsError as e:
+            logger.error(f"Statistics calculation error: {e}", exc_info=True)
+            error_message = f"##GRN-VARIANCE-ERROR## Statistics calculation error: {e}"
+            raise ValueError(error_message) from e
+        except (ValueError, TypeError, ZeroDivisionError) as e:
+            logger.error(f"Data processing error in calculating EDA metrics: {e}", exc_info=True)
+            error_message = f"##GRN-VARIANCE-ERROR## Data processing error in calculating EDA metrics: {e}"
+            raise ValueError(error_message) from e
+        except (KeyError, IndexError) as e:
+            logger.error(f"Data structure error in calculating EDA metrics: {e}", exc_info=True)
+            error_message = f"##GRN-VARIANCE-ERROR## Data structure error in calculating EDA metrics: {e}"
+            raise ValueError(error_message) from e
+        except Exception as e:
+            logger.error(f"Unexpected error in calculating EDA metrics: {e}", exc_info=True)
+            error_message = f"##GRN-VARIANCE-ERROR## Error in calculating EDA metrics: {e}"
+            raise ValueError(error_message) from e
+
+        # Compile comprehensive statistical summary
+        statistical_summary = {
+            "nHistoricalRecords": record_count,
+            "grnVarianceMean": grn_variance_mean,
+            "grnVariancePercentiles": grn_variance_percentiles,
+            "grnVarianceMin": grn_variance_min,
+            "grnVarianceMax": grn_variance_max,
+            "grnVarianceMonthWise": grn_variance_month_wise
+        }
+
+    logger.info("Statistical summary compiled successfully")
+    
+    try:
+        # Convert summary to JSON format for LLM consumption
+        statistical_summary_json = json.dumps(statistical_summary, indent=2)
+        logger.info("Historical analysis metrics calculation completed successfully")
+    except (TypeError, ValueError) as e:
+        logger.error(f"JSON serialization error: {e}", exc_info=True)
+        error_message = f"##GRN-VARIANCE-ERROR## Error in converting EDA summary to JSON: {e}"
+        raise ValueError(error_message) from e
+    except Exception as e:
+        logger.error(f"Unexpected error in JSON conversion: {e}", exc_info=True)
+        error_message = f"##GRN-VARIANCE-ERROR## Error in converting EDA summary to JSON: {e}"
+        raise ValueError(error_message) from e
+
+
+    return statistical_summary_json
