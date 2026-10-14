@@ -1,0 +1,57 @@
+"""LLM integration module for Tax Code Identification.
+
+This module provides Azure OpenAI integration for generating justifications
+for tax code identification. It handles API calls,response validation, and structured output formatting.
+"""
+
+import os
+from typing import Tuple
+
+from openai import AzureOpenAI
+
+
+def get_azure_openai_client() -> AzureOpenAI:
+    """Create and return an Azure OpenAI client instance.
+
+    This function initializes an Azure OpenAI client using environment variables for endpoint, API key, and API version configuration.
+
+    Returns:
+        AzureOpenAI: Configured Azure OpenAI client instance.
+    """
+    return AzureOpenAI(
+        azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
+        api_version=os.environ.get("AZURE_OPENAI_API_VERSION"),
+    )
+
+
+def get_azure_openai_response(system_prompt: str, user_prompt: str) -> Tuple[str, int]:
+    """Call Azure OpenAI chat completion API and return response content and token count.
+
+    This function sends a prompt to Azure OpenAI's chat completion API with
+    predefined system instructions for GRN variance analysis.
+
+    Args:
+        system_prompt (str): The system prompt to send to the Azure OpenAI model.
+        user_prompt (str): The user prompt containing invoice and GRN details.
+
+    Returns:
+        Tuple[str, int]: A tuple containing the response content and total token count.
+    """
+    client = get_azure_openai_client()
+    try:
+        response = client.chat.completions.create(
+            model=os.environ.get("AZURE_OPENAI_MODEL"),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature = 1,
+            max_completion_tokens = 8192,
+            reasoning_effort="low"
+        )
+    except Exception as e:
+        error_message = f"##TAX-CODING-ERROR## Error in chat completion request: {e}"
+        raise ValueError(error_message) from e
+
+    return response.choices[0].message.content, response.usage.total_tokens
