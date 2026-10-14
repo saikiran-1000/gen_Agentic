@@ -1,0 +1,58 @@
+"""Output Validation Module.
+
+This module provides output validation schemas and functions to ensure data integrity for LLM responses and final results. It uses Pydantic models to validate structure and content before returning results to downstream systems.
+"""
+
+from typing import List
+from data_models import *
+from pydantic import ValidationError
+import logging
+
+def llm_response_validation(llm_response: Dict[str, Any]) -> None:
+    """Validate LLM response structure and content.
+
+    Ensures AI-generated responses contain all required fields with correct
+    data types before further processing.
+
+    Args:
+        llm_response (dict): Raw LLM response to validate.
+
+    Raises:
+        ValueError: If the response does not match the FinalTaxCodingOutput schema.
+    """
+    try:
+        FinalTaxCodingOutput(**llm_response)
+        logging.info("LLM response schema validation successful.")
+    except ValidationError as e:
+        error_details = e.errors()
+        error_message = (
+            f"##TAX-CODING-ERROR## LLM JSON Schema Validation Error: {error_details}"
+        )
+        logging.error(error_message)
+        raise ValueError(error_message) from e
+    
+def output_validation(results: Dict[str, Any]) -> None:
+    """
+    Validates the final results.
+
+    This function ensures that the `results` dictionary conforms to the
+    `FinalTaxCodingOutput` schema. It checks for the presence of the top-level
+    invoice ID and validates the structure of each item in the results list.
+
+    Args:
+        results (Dict[str, Any]): The complete analysis results dictionary to validate.
+
+    Raises:
+        ValueError: If the results dictionary fails validation against the
+                    Pydantic schema, a formatted error is raised.
+    """
+    try:
+        FinalTaxCodingOutput(**results)
+        logging.info(f"Output JSON Validated.")
+
+
+    except ValidationError as e:
+        error_message = (
+            f"##TAX-CODING-ERROR## Final Output JSON Schema Validation Error: {e}"
+        )
+        raise ValueError(error_message) from e
