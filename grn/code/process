@@ -1,0 +1,194 @@
+"""Invoice Processing Module for GRN Variance Analysis.
+
+This module processes validated invoice data, calculates GRN variances, generates AI-powered recommendations, and formats results for final output. It handles business logic for variance analysis and LLM integration.
+"""
+
+import json
+from typing import Any, Dict
+import logging
+
+
+from historical_analysis_metrics import historical_analysis_metrics
+from llm_call import get_azure_openai_response
+from output_validation import llm_response_validation
+
+
+logger = logging.getLogger(__name__)
+
+
+def process_invoice(upstream_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Process invoice data and generate GRN variance analysis results.
+    Analyzes each invoice line item for GRN variances, applies business rules,
+    and generates LLM recommendations where applicable.
+
+    Args:
+        upstream_data (Dict[str, Any]): Validated invoice data with line items and historical data
+        config (Dict): Configuration dictionary with field mappings and prompts.
+
+    Returns:
+        Dict[str, Any]: Processed results with variance analysis and AI justifications
+    """
+    logger.info("Starting invoice processing")
+    
+    output_dict = {}
+    output_dict['invoiceLineItemsResults'] = []
+    invoice_id = upstream_data.get("invoiceID")
+    invoice_date = upstream_data.get("invoiceDate")
+    country = upstream_data.get("country")
+
+    output_dict["vendorID"] = upstream_data.get("vendorID")
+    output_dict["invoiceID"] = invoice_id
+    output_dict["invoiceDate"] = invoice_date
+    
+    line_items = upstream_data.get("invoiceLineItems")
+
+    # Process each line item in the invoice
+    for idx, item in enumerate(line_items, 1):
+        # Calculate GRN variance percentage
+        item_grn_variance = round(abs((item["grnQuantity"] - item["invoiceQuantity"])/item["grnQuantity"])*100,2) if item["grnQuantity"] != 0 else 0
+        logger.debug(f"Line item {item.get('invoiceLineID')} variance: {item_grn_variance}%")
+
+        llm_response_json = {}
+
+        # Business rule: Skip analysis if invoice quantity < GRN quantity
+        if item["invoiceQuantity"] < item["grnQuantity"]:
+            logger.info(f"Line item {item.get('invoiceLineID')}: Skipping - Invoice qty < GRN qty")
+            processed_item = item
+            llm_response_json['threshold_used'] = "NA"
+            llm_response_json["justification"] = "No variance analysis as GRN quantity is greater than invoice quantity."
+
+        # Business rule: Skip analysis for negative quantities
+        elif item["grnQuantity"] < 0 or item["invoiceQuantity"] < 0:
+            logger.info(f"Line item {item.get('invoiceLineID')}: Skipping - Negative quantities detected")
+            processed_item = item
+            llm_response_json['threshold_used'] = "NA"
+            llm_response_json["justification"] = "No variance analysis as GRN quantity or invoice quantity is negative."
+
+        # Business rule: Limited analysis without historical data
+        elif len(item["historicalData"]) == 0:
+            logger.info(f"Line item {item.get('invoiceLineID')}: Skipping - No historical data")
+            processed_item = item
+            llm_response_json['threshold_used'] = "NA"
+            llm_response_json["justification"] = "No variance analysis as no historical data present."
+
+        else:
+            # LLM analysis with historical context
+            logger.info(f"Line item {item.get('invoiceLineID')}: Processing with LLM analysis")
+            processed_item = process_line_item(item, country, invoice_date, item_grn_variance, config)
+
+            try:
+                logger.debug(f"Parsing and validating LLM response for line item {item.get('invoiceLineID')}")
+                llm_response_json = json.loads(processed_item['llm_response'])
+                llm_response_validation(llm_response_json)
+                logger.debug(f"LLM response validated successfully for line item {item.get('invoiceLineID')}")
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON parsing error for line item {item.get('invoiceLineID')}: {e}", exc_info=True)
+                error_message = f"##GRN-VARIANCE-ERROR## LLM response JSON parsing error: {e}"
+                raise ValueError(error_message) from e
+            except ValueError as e:
+                logger.error(f"Validation error for line item {item.get('invoiceLineID')}: {e}", exc_info=True)
+                error_message = f"##GRN-VARIANCE-ERROR## LLM line level response schema validation error: {e}"
+                raise ValueError(error_message) from e
+
+            threshold_value = llm_response_json.get("threshold_used", "")
+            # Clean percentage value if present
+            if "%" in threshold_value:
+                try:
+                    threshold_value = str(threshold_value.replace("%", "").strip())
+                    logger.debug(f"Cleaned threshold value: {threshold_value}")
+                except (ValueError, AttributeError) as e:
+                    error_message = f"##GRN-VARIANCE-ERROR## Threshold parsing error: {e}"
+                    logger.error(error_message, exc_info=True)
+                    raise ValueError(error_message) from e
+
+        # Compile final line item result
+        output_dict['invoiceLineItemsResults'].append({
+            "invoiceLineID": processed_item.get("invoiceLineID"),
+            "materialDescription": processed_item.get("materialDescription"),
+            "materialID": processed_item.get("materialID"),
+            "variance": llm_response_json.pop("threshold_used", "NA"),
+            "justification": llm_response_json.pop("justification", "No justification provided"),
+            })
+        logger.debug(f"Line item {item.get('invoiceLineID')} processed successfully")
+    
+    logger.info(f"Invoice processing completed successfully. Processed {len(output_dict['invoiceLineItemsResults'])} line items")
+    return output_dict
+
+
+
+def process_line_item(invoice_line_item: Dict[str, Any], country_code: str, invoice_date: str, item_grn_variance: float, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Process individual line item with LLM variance analysis.
+
+    Performs historical analysis and generates LLM recommendations for a single invoice line item with variance context.
+
+    Args:
+        invoice_line_item (Dict[str, Any]): Line item data with historical context
+        country_code (str): Country code for regional analysis
+        invoice_date (str): Invoice date for temporal context
+        item_grn_variance (float): Calculated GRN variance percentage
+        config (Dict): Configuration dictionary with field mappings and prompts.
+
+    Returns:
+        Dict[str, Any]: Line item appended with LLM response and analysis results
+    """
+    line_item_id = invoice_line_item.get("invoiceLineID")
+    logger.debug(f"Starting detailed processing for line item: {line_item_id}")
+    
+    # Extract line item details
+    material_description = invoice_line_item.get("materialDescription", "")
+    invoice_qty = invoice_line_item.get("invoiceQuantity")
+    grn_qty = invoice_line_item.get("grnQuantity")
+    uom = invoice_line_item.get("uom")
+    historical_data = invoice_line_item.get("historicalData")
+    
+    logger.debug(f"Line item {line_item_id}: Material={material_description}, Invoice Qty={invoice_qty}, GRN Qty={grn_qty}")
+
+    # Generate statistical analysis of historical data
+    logger.debug(f"Generating historical analysis for line item {line_item_id}")
+    line_item_eda = historical_analysis_metrics({
+        "historicalData": historical_data
+    })
+    logger.debug(f"Historical analysis completed for line item {line_item_id}")
+
+    # Get LLM driven variance analysis and recommendations
+    logger.info(f"Calling LLM for variance analysis for line item {line_item_id}")
+    try:
+        llm_response_content, llm_response_tokens = get_azure_openai_response(
+            system_prompt=config.get("grn_variance_system_prompt"),
+            user_prompt=config.get("grn_variance_user_prompt").format(
+                material_description=material_description,
+                invoice_quantity=invoice_qty,
+                grn_quantity=grn_qty,
+                grn_variance=item_grn_variance,
+                uom=uom,
+                country=country_code,
+                invoice_date=invoice_date,
+                eda_report=line_item_eda
+            )
+        )
+        logger.info(f"LLM response received for line item {line_item_id}. Tokens used: {llm_response_tokens}")
+    except KeyError as e:
+        error_message = f"##GRN-VARIANCE-ERROR## Missing configuration or prompt template key: {e}"
+        logger.error(f"Line item {line_item_id}: {error_message}", exc_info=True)
+        raise ValueError(error_message) from e
+    except (TypeError, AttributeError) as e:
+        error_message = f"##GRN-VARIANCE-ERROR## Prompt formatting error - invalid data type or attribute: {e}"
+        logger.error(f"Line item {line_item_id}: {error_message}", exc_info=True)
+        raise ValueError(error_message) from e
+    except ValueError as e:
+        error_message = f"##GRN-VARIANCE-ERROR## LLM API error: {e}"
+        logger.error(f"Line item {line_item_id}: {error_message}", exc_info=True)
+        raise ValueError(error_message) from e
+    except Exception as e:
+        error_message = f"##GRN-VARIANCE-ERROR## Unexpected error in LLM call: {e}"
+        logger.error(f"Line item {line_item_id}: {error_message}", exc_info=True)
+        raise ValueError(error_message) from e
+
+
+    # Append line item with analysis results
+    invoice_line_item['current_variance'] = item_grn_variance
+    invoice_line_item['llm_response'] = llm_response_content
+    invoice_line_item['llm_response_tokens'] = llm_response_tokens
+    
+    logger.debug(f"Line item {line_item_id} processing completed with LLM analysis")
+    return invoice_line_item
