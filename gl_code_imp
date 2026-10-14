@@ -1,0 +1,174 @@
+Sysco GL code Base Approach
+
+Input data for training - 'Invoice: OPCO Code', 'Amount', 'Invoice: Vendor Number'
+Output to be predicted - 'Cost Center', 'Spend Categories'
+
+Got it —
+You want this full set of LLM approaches for predicting GL codes written like a proper report — formal, structured, almost like a design/solution document.
+Here’s the complete report:
+________________________________________
+📄 Report: LLM-Based Approaches for GL Code Prediction
+________________________________________
+1. Introduction
+The objective of this report is to explore different methods for using Large Language Models (LLMs) to predict General Ledger (GL) codes based on invoice data fields such as description, business type, company code, amount, and tax code.
+This report outlines multiple solution architectures, their working principles, pros and cons, and recommendations based on project constraints like data volume, accuracy, scalability, and cost.
+________________________________________
+2. Problem Statement
+Goal:
+Predict the correct GL Code for a given invoice entry using available invoice fields.
+Inputs:
+•	Invoice Description
+•	Business Type
+•	Company Code
+•	Amount
+•	Tax Code
+•	(Optional) Other available fields
+Output:
+•	Predicted GL Code (numeric or alphanumeric)
+________________________________________
+3. Approaches Using LLMs
+Below are detailed approaches to solve the problem using Large Language Models:
+________________________________________
+3.1 Single-Shot Prompting
+Description:
+For each invoice, dynamically generate a prompt with its fields and directly ask the LLM to predict the GL Code without any additional context.
+Example Prompt:
+You are a finance domain expert. Predict the GL Code for:
+
+Description: Purchase of Office Chairs  
+Business Type: Procurement  
+Company Code: 1001  
+Amount: 3000  
+Tax Code: A0
+Pros:
+•	Fast to implement
+•	Low complexity
+•	Suitable for small-scale systems
+Cons:
+•	Lower accuracy
+•	No memory of past examples
+•	Sensitive to prompt quality
+Best suited for: MVPs, PoCs, small datasets
+________________________________________
+3.2 Few-Shot Prompting
+Description:
+Provide a few manually curated examples of past invoices and their GL Codes within the prompt to guide the model before asking for a prediction.
+Example Prompt:
+Examples:
+- Purchase of Office Chairs → GL Code: 620001
+- Cloud Software Subscription → GL Code: 700123
+
+Now predict for:
+Description: Purchase of Laptops
+Business Type: IT Support
+Pros:
+•	Improves prediction quality
+•	No model training required
+•	Flexible for moderate volume
+Cons:
+•	Prompt becomes large as examples increase
+•	Hard to cover all edge cases
+Best suited for: Moderate datasets where example variability matters
+________________________________________
+3.3 Retrieval-Augmented Generation (RAG)
+Description:
+Build a vector database of historical invoice examples. For each new invoice, retrieve the top N similar invoices, then prompt the LLM with those examples to make an informed prediction.
+Architecture:
+1.	Embed past invoices into vectors.
+2.	Perform similarity search for a new invoice.
+3.	Construct the prompt using retrieved examples.
+4.	Predict GL Code via LLM.
+Pros:
+•	Maintains historical memory
+•	More accurate and context-aware
+•	Handles large datasets well
+Cons:
+•	Needs separate vector DB setup
+•	Slightly complex architecture
+Best suited for: Production systems, medium-to-large datasets
+________________________________________
+3.4 Chain-of-Thought (CoT) Prompting
+Description:
+Instruct the LLM to reason step-by-step before predicting the GL Code, improving its logical consistency.
+Example Prompt:
+Let's reason step-by-step:
+1. Identify nature of goods.
+2. Match to correct business category.
+3. Derive GL Code.
+
+Invoice Details: ...
+Pros:
+•	Increases explainability
+•	Reduces hallucinations
+•	Useful for audit/compliance scenarios
+Cons:
+•	Longer and costlier prompts
+•	Slower inference
+Best suited for: Cases needing explainable AI outputs
+________________________________________
+3.5 Function Calling / Tool Use
+Description:
+Use OpenAI's function calling capabilities or similar APIs where the LLM can call backend functions like fetch_gl_code() to assist in GL Code mapping.
+Pros:
+•	Highly structured
+•	Reduces hallucinations
+•	Can integrate with enterprise master data systems
+Cons:
+•	Needs reliable GL mapping functions
+•	Limited flexibility for unknown cases
+Best suited for: Systems with relatively fixed GL mappings
+________________________________________
+3.6 Fine-Tuning Small LLMs
+Description:
+Fine-tune a small open-source LLM (e.g., Mistral 7B, Llama 3 8B) on historical invoice-to-GL code data to create a specialized GL Code predictor.
+Steps:
+•	Create instruction datasets.
+•	Fine-tune using HuggingFace/OpenAI.
+•	Deploy and serve as an API.
+Pros:
+•	Very fast inference
+•	Customized for your business
+•	No need for complex prompt engineering
+Cons:
+•	High upfront effort and cost
+•	Needs large labeled datasets (1000+ samples)
+Best suited for: High-scale production environments
+________________________________________
+3.7 Self-Consistency via Multiple Inference Calls
+Description:
+Send the same invoice to the LLM multiple times (e.g., 5 times) and use majority voting among the outputs to finalize the GL Code prediction.
+Pros:
+•	Reduces randomness
+•	Improves stability of predictions
+Cons:
+•	3x–5x inference cost
+•	Adds latency
+Best suited for: High-accuracy critical systems
+________________________________________
+4. Comparison Table
+Approach	Complexity	Accuracy	Cost	Scalability	Explainability
+Single-shot	Low	Low	Low	Low	No
+Few-shot	Low-Medium	Medium	Medium	Low-Medium	Partial
+RAG	High	High	Medium-High	High	Yes
+Chain-of-Thought	Medium	High	Medium	Medium	Yes
+Function Calling	Medium	Very High	Low-Medium	Medium	Yes
+Fine-tuning Small LLM	High	Very High	High	Very High	Partial
+Self-Consistency (Voting)	Medium	Very High	Very High	Medium	Partial
+________________________________________
+5. Recommendations
+Based on expected project requirements:
+Scenario	Recommended Approach
+Small dataset (< 500 invoices)	Few-shot Prompting
+Medium dataset (500–5000 invoices)	RAG + Chain-of-Thought
+Large dataset (> 5000 invoices)	Fine-tuning + Retrieval Augmented System
+Highly critical predictions	Add Self-Consistency + Manual Review
+________________________________________
+6. Next Steps
+•	Analyze available labeled data quantity.
+•	Choose a prototype method (Few-Shot or RAG).
+•	Build MVP and measure model performance (accuracy, explainability).
+•	Scale to fine-tuned models or function-calling systems as needed.
+________________________________________
+
+
+
