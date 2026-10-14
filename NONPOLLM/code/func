@@ -1,0 +1,748 @@
+import azure.functions as func
+import logging
+import json
+import os
+import time
+from unique_gl_Cat_add import unique_GL_Categories_addition
+from GLCat_to_LineDesc import GLcat_to_lineDesc
+from gl_cc_logic import main_gl_cc_predict
+from parallel_call import main_parallel
+from parallel_call2 import main_parallel2
+from auto_upload import main_data_upload
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+logger = logging.getLogger(__name__)
+
+from azure.storage.blob import BlobServiceClient
+blob_connection_string = os.getenv('AzureWebJobsStorage')
+def get_blob_service_client(blob_connection_string):
+    # Initialize BlobServiceClient
+    blob_client = BlobServiceClient.from_connection_string(blob_connection_string)
+    logger.info(f"blob_service_client, {blob_client}")
+    return blob_client
+
+blob_service_client = get_blob_service_client(blob_connection_string)
+
+from typing import List, Dict, Any
+
+
+def dedupe_by_score(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Deduplicate a list of invoice prediction dictionaries based on ID.
+    For duplicate IDs:
+        1. Keep the one with higher GL Code confidence_score.
+        2. If tied, keep the one with higher Cost Code confidence_score.
+
+    Args:
+        data (list): List of prediction dicts.
+
+    Returns:
+        list: Deduplicated list with best-scored dict per ID.
+    """
+
+    best_records = {}
+
+    for item in data:
+        # Validate required keys
+        item_id = item.get("ID")
+        if item_id is None:
+            # Skip silently or log — your choice:
+            # logger.warning("Record skipped: missing ID field")
+            continue
+
+        gl_score = (
+            item.get("GL Code", {}).get("confidence_score", float("-inf"))
+        )
+        cost_score = (
+            item.get("Cost Code", {}).get("confidence_score", float("-inf"))
+        )
+
+        # If first time seeing this ID, store it
+        if item_id not in best_records:
+            best_records[item_id] = item
+            continue
+
+        # Compare with existing record
+        existing = best_records[item_id]
+        existing_gl = existing.get("GL Code", {}).get("confidence_score", float("-inf"))
+        existing_cost = existing.get("Cost Code", {}).get("confidence_score", float("-inf"))
+
+        # Decide replacement: GL score wins first
+        if gl_score > existing_gl:
+            best_records[item_id] = item
+        elif gl_score == existing_gl and cost_score > existing_cost:
+            best_records[item_id] = item
+
+    return list(best_records.values())
+
+def fetch_config(container_name, blob_name):
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(blob_name)
+
+        # Download blob content
+        download_stream = blob_client.download_blob()
+        config_data = download_stream.readall()
+
+        # Parse JSON string to dict
+        config_dict = json.loads(config_data)
+        logger.info(f"Fetched {blob_name} from {container_name}")
+        return config_dict
+    except Exception as e:
+        logger.error(f"Error fetching config: {e}")
+        return None
+
+
+##################################################################################################
+# REMAP KEYS
+def remap_keys(data: dict, mapping: dict) -> dict:
+    """Recursively rename keys in a dict based on mapping."""
+    if isinstance(data, dict):
+        new_dict = {}
+        for k, v in data.items():
+            new_key = mapping.get(k, k)  # fallback to original key if not in mapping
+            new_dict[new_key] = remap_keys(v, mapping)
+        return new_dict
+    elif isinstance(data, list):
+        return [remap_keys(item, mapping) for item in data]
+    else:
+        return data
+# container = "nonpoconfig"
+# blob = "config.json"
+
+# # Fetch / Download
+# config = fetch_config(container, blob)
+
+@app.route(route="nonpocoding-llm")
+def nonPOLLM2(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function started processing a request.')
+
+    if req.method != "POST":
+        return func.HttpResponse("Only POST method is supported.", status_code=405)
+
+    # ---- Parse request ----
+    try:
+        test_data = req.get_json()
+        logging.info(f"Data received for inferencing: {test_data}")
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 400, "message": "Invalid JSON format"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not test_data:
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 400, "message": "No data found for inferencing"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+    try:
+        container = "nonpoconfig"
+        blob = "config.json"
+
+        # Fetch / Download
+        config = fetch_config(container, blob)
+    except Exception as e:
+        logging.exception(f"Unexpected error while loading config from container: {e}")
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 500, "message": f"Unexpected error while loading config from container: {str(e)}"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+    logging.info(f"Loaded config: {config}")
+    try:
+        main_data_upload(config)
+    except:
+        logging.exception(f"Unexpected error during historical data upload to Azure AI Search: {e}")
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 500, "message": f"Unexpected error during historical data upload to Azure AI Search: {str(e)}"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+    try:
+        result1 = unique_GL_Categories_addition(test_data, config)
+        if not isinstance(result1, dict) or result1.get("status") != "success":
+            error_message = result1.get("message", "Unknown error") if isinstance(result1, dict) else "Invalid result"
+            logging.error(f"Master data fetch failed: {error_message}")
+            return func.HttpResponse(
+                json.dumps({"status": "error", "status_code": result1.get("status_code", 500) if isinstance(result1, dict) else 500, "message": error_message}),
+                status_code=result1.get("status_code", 500) if isinstance(result1, dict) else 500,
+                mimetype="application/json"
+            )
+        req_body = result1["data"]["data"]
+        desc_to_explaination=req_body["masterGLCategories"]
+    except Exception as e:
+        logging.exception(f"Unexpected error during master data fetch: {e}")
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 500, "message": f"Issue in master data fetch: {str(e)}"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    # ---- LLM callout ----
+    try:
+        result2={}
+        # result2 = gl_categories_main(req_body, config)
+        batch_size=config.get("batch_size_for_parallel_call")
+        line_detail_identifier=config.get("input_data_field_mapping").get("invls_detail")
+        start_time_result2_parallel=time.time()
+        # logger.info(f"LLM 1 input: {req_body}")
+        result2_parallel=main_parallel(req_body, line_detail_identifier, batch_size, config)
+        end_time_result2_parallel=time.time()
+        total_time_result2_parallel=end_time_result2_parallel-start_time_result2_parallel
+        # result2["data"]["invoiceLineItemsResults"][0]["glCategories"]=["Service Agreements"]
+        if not isinstance(result2_parallel, dict) or result2_parallel.get("status") != "success":
+            error_message = result2_parallel.get("error", "Unknown error") if isinstance(result2_parallel, dict) else "Invalid result"
+            logging.error(f"LLM callout failed: {error_message}")
+            return func.HttpResponse(
+                json.dumps({"status": "error", "status_code": 500, "message": f"Issue in LLM callout: {error_message}"}),
+                status_code=500,
+                mimetype="application/json"
+            )
+        logging.info("LLM callout executed successfully.")
+        ires=[]
+        iitems=[]
+        ######################################
+        llm1_result = (
+            result1.get("data", {})
+                .get("data", {})
+                .get(line_detail_identifier, [{}])[0]
+                .get("result", {})
+        )
+
+        llm1_data = llm1_result.get("data")
+
+        # Log what LLM returned
+        # logger.info(f"LLM 1 input: {llm1_result}")
+
+        # If data is None or empty → return error response
+        if not llm1_data:
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "error",
+                    "status_code": 500,
+                    "message": f"Issue in LLM callout, getting this from LLM layer 1: {llm1_result}"
+                }),
+                status_code=500,
+                mimetype="application/json"
+            )
+        ######################################
+        temp_dict = llm1_data.copy()
+        # logger.info(f"LLM 1 input: {result1.get("data").get("data").get(line_detail_identifier)[0].get("result")}")
+        # temp_dict=result1.get("data").get("data").get(line_detail_identifier)[0].get("result").get("data").copy()
+        for item in result1.get("data").get("data").get(line_detail_identifier):
+            ires.extend(item.get("result").get("data").get("invoiceLineItemsResults"))
+            iitems.extend(item.get("result").get("data").get("invoiceLineItems"))
+        temp_dict_keys=list(temp_dict.keys())
+        for key in temp_dict_keys:
+            if key=="invoiceLineItemsResults":
+                result2[key]=ires
+                continue
+            if key=="invoiceLineItems":
+                result2[key]=iitems
+                continue
+            result2[key]=temp_dict[key]
+        logging.info(f"LLM 1 output: {ires}")
+              
+    except Exception as e:
+        logging.exception(f"Unexpected error during LLM callout: {e}")
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 500, "message": f"Issue in LLM callout: {str(e)}"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    try:
+        result2_1 = GLcat_to_lineDesc(
+            result2,
+            result1["data"]["newCategories"],
+            result1["data"]["glDesc_info"],
+            desc_to_explaination,
+            config
+        )
+
+        # Safely delete nested key only if it exists
+        if isinstance(result2_1, dict):
+            llm_data = result2_1.get("llm_data", {})
+            if isinstance(llm_data, dict) and "invoiceLineItemsResults" in llm_data:
+                del llm_data["invoiceLineItemsResults"]
+                result2_1["llm_data"] = llm_data  # update after deletion
+
+
+        logger.info("########################## 2 #####################################")
+
+        if not isinstance(result2_1, dict) or result2_1.get("status") != "success":
+            error_message = (
+                result2_1.get("message", "Unknown error")
+                if isinstance(result2_1, dict)
+                else "Invalid result"
+            )
+            logging.error(
+                f"Failed while adding line description through python code: {error_message}"
+            )
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "error",
+                    "status_code": 500,
+                    "message": f"Failed while adding line description through python code: {error_message}"
+                }),
+                status_code=500,
+                mimetype="application/json"
+            )
+
+        logging.info("Line description added successfully.")
+
+    except Exception as e:
+        logging.exception(f"Unexpected error while adding line description: {e}")
+        return func.HttpResponse(
+            json.dumps({
+                "status": "error",
+                "status_code": 500,
+                "message": f"Issue in LLM callout result2_1: {str(e)}"
+            }),
+            status_code=500,
+            mimetype="application/json"
+        )
+    
+    ########################FINAL ##############################
+    
+    ################## REMAP KEYS ############
+    mapping = config.get("LLM_to_salesforce_key_mapping", {})
+    # llm_response_result2=result2["data"].copy()
+    result2_data = remap_keys(result2, mapping)
+    result2_data_copy = result2_data.copy()
+    logging.info("Keys remapped successfully.")
+
+    ##################### GL_CC PREDICT FOR NON LLM LINES #################
+    non_llm_lines = result2_1.get("non_llm_lines")
+
+    ans = []
+    all_line_detail = {}
+    keep_ids = set()       # collect ids that go through the else path
+
+    # Filter lines to send to gl_cc predict
+    for line in non_llm_lines:
+        try:
+            id = line.get(config.get("field_name_for_invoice_line_id"))
+            flag = line.get("Flag")
+
+            if flag == "direct_result":
+                r = line.get("result")
+                ans.append(r)
+
+            else:
+                keep_ids.add(id)
+                all_line_detail.update(line.get("all_line_detail"))
+
+        except Exception as e:
+            logger.error(f"Error while processing non_llm_lines loop: {e}")
+
+    # Now filter result2_data to keep only else-condition lines
+    try:
+        inv_key = config.get("inv_line_detail_identifier")
+        field_key = config.get("field_name_for_invoice_line_id")
+
+        res2 = result2_data.get(inv_key, [])
+        result2_data[inv_key] = [
+            item for item in res2
+            if item.get(field_key) in keep_ids
+        ]
+    except Exception as e:
+        logger.error(f"Error while filtering result2_data: {e}")
+
+    # GL_CC prediction call
+    try:
+        gl_cc_res_nonLLM = main_gl_cc_predict(
+            result2_data,
+            all_line_detail,
+            config
+        )
+        logger.info(f"GLCC prediction for non llm lines: {gl_cc_res_nonLLM} and direct result: {ans}")
+    except Exception as e:
+        logger.error(f"Error during GLCC prediction for non LLM lines: {e}")
+
+    try:
+        result_llm2={}
+        result_llm2["data"] = {
+            "invoiceID": "",
+            "invoiceDate": "",
+            "vendorID": "",
+            "approverName": "",
+            "invoiceLineItemsResults": []
+        }
+        total_time=0
+        llm2_result={}
+        if len(result2_1["llm_data"].get("invoiceLineItems"))>0:
+            # logger.info(f"LLM DATA for llm call 2: {result2_1["llm_data"]}")
+            # result_llm2 = lineDesc_match_main(result2_1["llm_data"], config)
+            line_detail_identifier2="invoiceLineItems"
+            batch_size2=config.get("batch_size2_for_parallel_call")
+            start_time=time.time()
+            # logger.info(f"LLM 2 input: {result2_1["llm_data"]}")
+            result_llm2_parallel=main_parallel2(result2_1["llm_data"], line_detail_identifier2, batch_size2, config)
+            end_time=time.time()
+            total_time=end_time-start_time
+            if not isinstance(result_llm2_parallel, dict) or result_llm2_parallel.get("status") != "success":
+                error_message = result_llm2_parallel.get("error", "Unknown error")
+                logging.error(
+                    f"Failed while filtering line description through python code: {error_message}"
+                )
+                
+                return func.HttpResponse(
+                    json.dumps({
+                        "status": "error",
+                        "status_code": 500,
+                        "message": f"Failed while filtering line description through python code: {error_message}"
+                    }),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+            logging.info("Line description filtered successfully.")
+            # --------------------------------------------------------------------------------------
+            #########################
+            i2items=[]
+            llm2_items = result2_1.get("llm_data", {}).get("invoiceLineItems", [])
+            llm2_result = llm2_items[0].get("result", {}) if llm2_items else {}
+            llm2_data = llm2_result.get("data")
+            logger.info(f"LLM 2 input: {llm2_result}")
+            # Guard clause
+            if not llm2_data:
+                return func.HttpResponse(
+                    json.dumps({
+                        "status": "error",
+                        "status_code": 500,
+                        "message": f"Issue in LLM callout, getting from LLM layer 2: {llm2_result}"
+                    }),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+
+            temp2_dict = llm2_data.copy()
+            #########################
+            for item in result2_1["llm_data"].get("invoiceLineItems"):
+                i2items.extend(item.get("result").get("data").get("invoiceLineItemsResults"))
+            temp2_dict_keys=list(temp2_dict.keys())
+            for key in temp2_dict_keys:
+                if key=="invoiceLineItemsResults":
+                    llm2_result[key]=i2items
+                    continue
+                llm2_result[key]=temp_dict[key]
+            logger.info(f"LLM 2 output: {i2items}")
+
+        # result2_1["ll1_timing"]=total_time_result2_parallel
+        # result2_1["llm2_timing"]=total_time
+        # result2_1["llm2_result"]=llm2_result
+        logger.info(f"LLM1 timing: {total_time_result2_parallel} and LLM2 timing: {total_time}")
+    except Exception as e:
+        logging.exception(f"Unexpected error while filtering line description: {e}")
+        return func.HttpResponse(
+            json.dumps({
+                "status": "error",
+                "status_code": 500,
+                "message": f"Issue in LLM callout result_llm2: {str(e)}"
+            }),
+            status_code=500,
+            mimetype="application/json"
+        )
+####################################### CUSTOM PREDICT #####################################
+
+# Extract invoice line ids from llm2 call to be sent to glcc predict
+    try:
+        line_items = llm2_result.get("invoiceLineItemsResults", [])
+    except Exception as e:
+        logger.error(f"Error while reading llm2_result: {e}")
+        line_items = []
+
+    try:
+        if line_items:
+            ids_to_keep = {item.get("invoiceLineID") for item in line_items}
+
+            inv_key = config.get("inv_line_detail_identifier")
+            field_key = config.get("field_name_for_invoice_line_id")
+
+            res2 = result2_data_copy.get(inv_key, [])
+
+            # keep only lines present in invoiceLineItemsResults
+            result2_data_copy[inv_key] = [
+                item for item in res2
+                if item.get(field_key) in ids_to_keep
+            ]
+    except Exception as e:
+        logger.error(f"Error while filtering result2_data_copy for LLM2 invoice lines: {e}")
+
+    try:
+        line_items = llm2_result.get("invoiceLineItemsResults", [])
+        all_line_detail = {}
+
+        all_line_for_llm_usecase = result2_1["all_lines_for_llm_usecase"]
+
+        matched_list = []
+        logger.info(all_line_for_llm_usecase)
+    except Exception as e:
+        logger.error(f"Error initializing LLM matching structures: {e}")
+        matched_list = []
+        all_line_detail = {}
+
+    # Step 1: Perform match logic FIRST
+    try:
+        for item in line_items:
+            inv_id = item.get("invoiceLineID")
+            match_desc = item.get("matchingLineDescription")
+
+            if inv_id not in all_line_for_llm_usecase:
+                continue
+
+            for candidate in all_line_for_llm_usecase[inv_id]:
+                if candidate.get("lineDescription") == match_desc:
+                    logger.info(f"Matched: {candidate}")
+                    matched_list.append(candidate)
+    except Exception as e:
+        logger.error(f"Error while matching LLM invoice lines: {e}")
+
+    # Step 2: Build post-match all_line_detail
+    try:
+        post_match_all_line_detail = {}
+        
+        for match in matched_list:
+            gl_cat = match.get("GLDescriptions")
+
+            if gl_cat not in post_match_all_line_detail:
+                post_match_all_line_detail[gl_cat] = []
+
+            post_match_all_line_detail[gl_cat].append(match)
+
+        logger.info(f"Post-match all_line_detail: {post_match_all_line_detail}")
+    except Exception as e:
+        logger.error(f"Error while building post-match all_line_detail: {e}")
+        post_match_all_line_detail = {}
+
+    # Step 3: Check if approver filter would leave any CC data AFTER matching
+    try:
+        header_approver = result2_data_copy.get(config.get("approverName_field_in_header"))
+        approver_database_name = config.get("Approver_column_name_in_database")
+        
+        has_cc_data_after_filter = False
+        
+        for gl_cat, rows in post_match_all_line_detail.items():
+            for row in rows:
+                if row.get(approver_database_name) == header_approver:
+                    has_cc_data_after_filter = True
+                    break
+            if has_cc_data_after_filter:
+                break
+        
+        logger.info(f"Approver filter check (after matching) - Has CC data: {has_cc_data_after_filter}")
+    except Exception as e:
+        logger.error(f"Error checking approver filter: {e}")
+        has_cc_data_after_filter = True  # Default to normal flow on error
+
+    # Initialize variables for GL/CC prediction results
+    gl_cc_res_llm = {"data": []}
+
+    if not has_cc_data_after_filter:
+        logger.info("No CC data after approver filter (post-match) - using split prediction approach")
+        
+        # Build pre-match all_line_detail for CC prediction
+        try:
+            pre_match_all_line_detail = {}
+            
+            for item in line_items:
+                inv_id = item.get("invoiceLineID")
+                
+                if inv_id not in all_line_for_llm_usecase:
+                    continue
+                    
+                for candidate in all_line_for_llm_usecase[inv_id]:
+                    gl_cat = candidate.get("GLDescriptions")
+                    
+                    if gl_cat not in pre_match_all_line_detail:
+                        pre_match_all_line_detail[gl_cat] = []
+                    
+                    pre_match_all_line_detail[gl_cat].append(candidate)
+            
+            logger.info(f"Pre-match all_line_detail for CC prediction: {pre_match_all_line_detail}")
+        except Exception as e:
+            logger.error(f"Error building pre-match all_line_detail: {e}")
+            pre_match_all_line_detail = {}
+        
+        # Get CC codes ONLY from pre-match data
+        try:
+            cc_prediction_result = main_gl_cc_predict(
+                result2_data_copy,
+                pre_match_all_line_detail,
+                config,
+                predict_only="cc_only"
+            )
+            logger.info(f"CC prediction result (pre-match): {cc_prediction_result}")
+        except Exception as e:
+            logger.error(f"Error during CC prediction (pre-match): {e}")
+            cc_prediction_result = {"data": []}
+        
+        # Get GL codes ONLY from post-match data
+        try:
+            gl_prediction_result = main_gl_cc_predict(
+                result2_data_copy,
+                post_match_all_line_detail,
+                config,
+                predict_only="gl_only"
+            )
+            logger.info(f"GL prediction result (post-match): {gl_prediction_result}")
+        except Exception as e:
+            logger.error(f"Error during GL prediction (post-match): {e}")
+            gl_prediction_result = {"data": []}
+        
+        # Merge CC and GL results
+        try:
+            merged_results = {}
+            
+            # First, store all CC predictions
+            for item in cc_prediction_result.get("data", []):
+                item_id = item.get("ID")
+                merged_results[item_id] = item.copy()
+            
+            # Then, merge GL predictions
+            for item in gl_prediction_result.get("data", []):
+                item_id = item.get("ID")
+                
+                if item_id in merged_results:
+                    # Update GL code from post-match prediction
+                    merged_results[item_id]["GL Code"] = item.get("GL Code", {"field_value": "NA", "confidence_score": 0.0})
+                else:
+                    # If ID not found in CC predictions, add the entire item
+                    merged_results[item_id] = item.copy()
+            
+            gl_cc_res_llm = {"status": "success", "status_code": 200, "data": list(merged_results.values())}
+            logger.info(f"Merged GL/CC prediction results: {gl_cc_res_llm}")
+            
+        except Exception as e:
+            logger.error(f"Error merging GL and CC predictions: {e}")
+            gl_cc_res_llm = {"data": []}
+
+    else:
+        logger.info("CC data available after approver filter (post-match) - using normal prediction flow")
+        
+        # Predict both GL and CC together from post-match data
+        try:
+            gl_cc_res_llm = main_gl_cc_predict(
+                result2_data_copy,
+                post_match_all_line_detail,
+                config,
+                predict_only="both"
+            )
+            logger.info(f"GL/CC prediction result (normal flow): {gl_cc_res_llm}")
+        except Exception as e:
+            logger.error(f"Error during GLCC prediction for LLM lines: {e}")
+            gl_cc_res_llm = {"data": []}
+
+
+    # Build final output
+    try:
+        result2_1["final_output"] = {
+            "status": "success",
+            "status_code": 200,
+            "data": []
+        }
+        unique_gl_cc_res_nonLLM = []
+        seen_ids = set()
+
+        for item in gl_cc_res_nonLLM.get("data", []):
+            item_id = item.get("ID")
+            if item_id not in seen_ids:
+                unique_gl_cc_res_nonLLM.append(item)
+                seen_ids.add(item_id)
+
+        unique_gl_cc_res_llm = []
+        seen_ids = set()
+
+        for item in gl_cc_res_llm.get("data", []):
+            item_id = item.get("ID")
+            if item_id not in seen_ids:
+                unique_gl_cc_res_llm.append(item)
+                seen_ids.add(item_id)
+        unique_ans = []
+        seen_ids = set()
+
+        for item in ans:
+            item_id = item.get("ID")
+            if item_id not in seen_ids:
+                unique_ans.append(item)
+                seen_ids.add(item_id)
+        # merge all three data sources
+        result2_1["final_output"]["data"].extend(unique_ans)
+        result2_1["final_output"]["data"].extend(unique_gl_cc_res_nonLLM)
+        result2_1["final_output"]["data"].extend(unique_gl_cc_res_llm)
+        # # merge all three data sources
+        # result2_1["final_output"]["data"].extend(ans)
+        # result2_1["final_output"]["data"].extend(gl_cc_res_nonLLM.get("data", []))
+        # result2_1["final_output"]["data"].extend(gl_cc_res_llm.get("data", []))
+
+        logging.info("GLCC prediction executed successfully.")
+        ####################### LOW CONFIDENCE ##################
+        
+        logging.info("Confidence score logic started")
+        try:
+            data = result2_1
+        except Exception as e:
+            logger.error(f"Failed to load result2_1: {e}")
+
+        low_conf_ids = set()
+
+        # --------------------------
+        # Extract low confidence from llm_data
+        # --------------------------
+        try:
+            llm_items = data.get("llm_data", {}).get("invoiceLineItems", [])
+            for item in llm_items:
+                try:
+                    low_info = item.get("low_confidence", {})
+                    if str(low_info.get("present")).lower() == "true":
+                        low_conf_ids.add(item.get("invoiceLineID"))
+                except Exception as e:
+                    logger.error(f"Error processing llm_data item: {e}")
+        except Exception as e:
+            logger.error(f"Error reading llm_data: {e}")
+
+        # --------------------------
+        # Extract low confidence from non_llm_lines
+        # --------------------------
+        try:
+            for item in data.get("non_llm_lines", []):
+                try:
+                    low_info = item.get("low_confidence", {})
+                    if str(low_info.get("present")).lower() == "true":
+                        low_conf_ids.add(item.get("ID"))
+                except Exception as e:
+                    logger.error(f"Error processing non_llm_lines item: {e}")
+        except Exception as e:
+            logger.error(f"Error reading non_llm_lines: {e}")
+
+        # --------------------------
+        # Update final_output confidence scores
+        # --------------------------
+        try:
+            for entry in data.get("final_output", {}).get("data", []):
+                try:
+                    line_id = entry.get("ID")
+                    if line_id in low_conf_ids:
+                        entry["GL Code"]["confidence_score"] = config.get("confidence_threshold")
+                        entry["Cost Code"]["confidence_score"] = config.get("confidence_threshold")
+                except Exception as e:
+                    logger.error(f"Error updating confidence for entry {entry}: {e}")
+        except Exception as e:
+            logger.error(f"Error iterating final_output data: {e}")
+        result_to_return=result2_1.get("final_output").get("data")
+        result_to_return=dedupe_by_score(result_to_return)
+        return func.HttpResponse(
+            json.dumps(result_to_return),
+            # json.dumps(result2_1),
+            status_code=200,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logger.error(f"Error building final output: {e}")
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+    
