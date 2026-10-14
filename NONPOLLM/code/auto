@@ -1,0 +1,521 @@
+import os
+import logging
+import pandas as pd
+from io import StringIO
+import time
+
+from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import ResourceNotFoundError
+from azure.storage.blob import BlobServiceClient
+from azure.search.documents import SearchClient
+from azure.search.documents.indexes import SearchIndexClient
+from azure.search.documents.indexes.models import (
+    SearchIndex,
+    SimpleField,
+    SearchField,
+    SearchableField,
+    SearchFieldDataType,
+    VectorSearch,
+    VectorSearchProfile,
+    HnswAlgorithmConfiguration
+)
+from openai import AzureOpenAI
+
+# Setup Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------
+# 1. BLOB STORAGE HELPERS
+# ---------------------------------------------------------
+
+def get_blob_service_client(connection_string):
+    return BlobServiceClient.from_connection_string(connection_string)
+
+def fetch_and_merge_csvs(blob_service_client, container_name):
+    """
+    Downloads all CSVs from the container and merges them into a single DataFrame.
+    """
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        blobs = list(container_client.list_blobs())
+    except Exception as e:
+        raise ValueError(f"Error accessing container '{container_name}': {e}")
+        # return pd.DataFrame()
+
+    csv_blobs = [b.name for b in blobs if b.name.lower().endswith(".csv")]
+    
+    if not csv_blobs:
+        logger.warning("No CSV blobs found.")
+        return pd.DataFrame()
+
+    dfs = []
+    encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
+
+    for blob_name in csv_blobs:
+        try:
+            blob_client = container_client.get_blob_client(blob_name)
+            blob_bytes = blob_client.download_blob().readall()
+            
+            # Smart decoding
+            blob_text = None
+            for enc in encodings:
+                try:
+                    blob_text = blob_bytes.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if blob_text is None:
+                logger.error(f"Failed to decode {blob_name}. Skipping.")
+                continue
+
+            # Read CSV
+            df = pd.read_csv(
+                StringIO(blob_text), 
+                dtype=str, 
+                keep_default_na=False
+            )
+            dfs.append(df)
+            logger.info(f"Loaded {blob_name} ({len(df)} rows)")
+
+        except Exception as e:
+            raise ValueError(f"Error processing blob {blob_name}: {e}")
+
+    if not dfs:
+        return pd.DataFrame()
+    try:
+        final_df = pd.concat(dfs, ignore_index=True)
+    except Exception as e:
+        raise ValueError(f"Error while concatenating all dataframe from csv files {blob_name}: {e}")
+    return final_df
+
+def archive_processed_blobs(blob_service_client, source_container, target_container, replaced_flag):
+    """
+    Moves processed blobs to a consumed container if replaced='yes'.
+    Includes copy-status verification to prevent data loss.
+    """
+    # 1. Early Exit check
+    if not replaced_flag or str(replaced_flag).lower() != "yes":
+        logger.info("Archive skipped: 'replaced' flag is not set to 'yes'.")
+        return
+
+    try:
+        source_client = blob_service_client.get_container_client(source_container)
+        target_client = blob_service_client.get_container_client(target_container)
+
+        # if not target_client.exists():
+        #     logger.info(f"Creating target container: {target_container}")
+        #     target_client.create_container()
+
+        try:
+            target_client.get_container_properties()
+            logger.info(f"Target container '{target_container}' already exists")
+        except ResourceNotFoundError:
+            logger.info(f"Creating target container: {target_container}")
+            target_client.create_container()
+
+        # List only CSV blobs
+        blobs = source_client.list_blobs()
+        csv_blobs = [b.name for b in blobs if b.name.lower().endswith(".csv")]
+
+        if not csv_blobs:
+            logger.info("No CSV files found to archive.")
+            return
+
+        logger.info(f"Starting archiving process for {len(csv_blobs)} files...")
+
+    except Exception as e:
+        logger.error(f"Failed to initialize archive clients: {e}")
+        raise # Critical failure during initialization
+
+    for blob_name in csv_blobs:
+        try:
+            source_blob = source_client.get_blob_client(blob_name)
+            target_blob = target_client.get_blob_client(blob_name)
+            
+            # Start copy operation
+            copy_props = target_blob.start_copy_from_url(source_blob.url)
+            
+            # --- Verification Logic ---
+            # For large blobs, copy might be asynchronous. We check the status.
+            copy_id = copy_props['copy_id']
+            status = copy_props['copy_status']
+            
+            # In most cases for internal Azure copies, this is 'success' immediately
+            if status == 'success':
+                source_blob.delete_blob()
+                logger.info(f"Successfully archived: {blob_name}")
+            else:
+                # If status is 'pending', we log it and avoid deleting the source
+                logger.warning(f"Copy for {blob_name} is {status} (ID: {copy_id}). Source not deleted.")
+
+        except Exception as e:
+            logger.error(f"Failed to archive blob '{blob_name}': {e}")
+            # We continue the loop so one bad file doesn't block the rest
+            continue
+
+    logger.info("Archive process completed.")
+
+# ---------------------------------------------------------
+# 2. DATA CLEANING
+# ---------------------------------------------------------
+
+def clean_dataframe(df, config):
+    """
+    Filters DataFrame based on relevant_fields and removes empty critical rows.
+    """
+    try:
+        cfg = config["AzureAIConfig"]
+        relevant_fields = cfg.get("relevant_fields", [])
+        
+        # Check if mandatory fields exist in DF
+        existing_fields = [col for col in relevant_fields if col in df.columns]
+        
+        if not existing_fields:
+            logger.warning("No mandatory fields found in dataframe!")
+            return pd.DataFrame()
+
+        # Drop rows where ANY of the existing relevant fields are totally empty
+        # (Adjust logic if you only want to drop if KEY field is empty)
+        df = df.dropna(subset=existing_fields)
+        df = df[existing_fields]
+        # Remove rows where fields are just whitespace
+        mask = df[existing_fields].apply(lambda x: x.astype(str).str.strip().eq("")).any(axis=1)
+        df_clean = df[~mask].copy()
+        
+        # Fill remaining NaNs with "N/A"
+        df_clean.fillna("N/A", inplace=True)
+        
+        logger.info(f"Data Cleaning: {len(df)} -> {len(df_clean)} rows.")
+        return df_clean
+    except Exception as e:
+        raise ValueError(f"Error while removing irrelevant fields from csv file: {e}")
+
+# ---------------------------------------------------------
+# 3. SEARCH INDEX MANAGEMENT
+# ---------------------------------------------------------
+
+def ensure_index_exists(index_client, config):
+    """
+    Creates the index if it doesn't exist, strictly following the config schema.
+    """
+    cfg = config["AzureAIConfig"]
+    index_name = cfg["index_name"]
+    vector_fields_cfg = cfg.get("vector_fields", {})
+
+    try:
+        index_client.get_index(index_name)
+        logger.info(f"Index '{index_name}' already exists.")
+    except ResourceNotFoundError:
+        logger.info(f"Index '{index_name}' not found. Creating...")
+        try:
+            fields = []
+            
+            # Helper lists
+            searchable = set(cfg.get("searchable", []))
+            filterable = set(cfg.get("filterable", []))
+            facetable = set(cfg.get("facetable", []))
+            retrievable = set(cfg.get("retrievable", []))
+            key_field = cfg["key_field"]
+
+            # 1. Add Standard Fields
+            for field_name in cfg.get("relevant_fields", []):
+                if field_name in vector_fields_cfg: 
+                    continue # Skip vector fields here
+
+                field_kwargs = {
+                    "name": field_name,
+                    "type": SearchFieldDataType.String,
+                    "retrievable": (field_name in retrievable or field_name == key_field)
+                }
+
+                if field_name == key_field:
+                    fields.append(SimpleField(**field_kwargs, key=True))
+                elif field_name in searchable:
+                    fields.append(SearchableField(**field_kwargs, searchable=True))
+                else:
+                    fields.append(SimpleField(
+                        **field_kwargs,
+                        filterable=(field_name in filterable),
+                        facetable=(field_name in facetable),
+                        sortable=(field_name in filterable)
+                    ))
+
+            # 2. Add Vector Fields
+            for vec_name, vec_cfg in vector_fields_cfg.items():
+                fields.append(SearchField(
+                    name=vec_name,
+                    type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+                    searchable=True,
+                    vector_search_dimensions=vec_cfg.get("dimensions"),
+                    vector_search_profile_name="vector-profile"
+                ))
+
+            # 3. Define Vector Config
+            vector_search = VectorSearch(
+                algorithms=[HnswAlgorithmConfiguration(name="hnsw-config")],
+                profiles=[
+                    VectorSearchProfile(
+                        name="vector-profile",
+                        algorithm_configuration_name="hnsw-config"
+                    )
+                ]
+            )
+
+            # 4. Create
+            index = SearchIndex(name=index_name, fields=fields, vector_search=vector_search)
+            index_client.create_index(index)
+            logger.info(f"Index '{index_name}' created successfully.")
+        except Exception as e:
+            raise ValueError(f"Error while creating new index for Azure AI Search for new csv file: {e}")
+
+def get_existing_keys(search_client, key_field):
+    """
+    Fetches all existing IDs to avoid re-uploading.
+    """
+    try:
+        results = search_client.search(search_text="*", select=[key_field])
+        # Use a set for O(1) lookup
+        keys = {str(doc[key_field]) for doc in results}
+        logger.info(f"Found {len(keys)} existing documents in index.")
+        return keys
+    except Exception as e:
+        logger.error(f"Error fetching existing keys: {e}")
+        return set()
+
+# ---------------------------------------------------------
+# 4. BATCH PROCESSING (MEMORY OPTIMIZED)
+# ---------------------------------------------------------
+
+def process_batches(df, config, openai_client, search_client, existing_keys):
+    """
+    Main loop: Filter -> Embed -> Upload -> Cleanup.
+    This ensures we never hold embeddings for the whole dataset in memory.
+    Includes robust error handling and configuration validation.
+    """
+    # ---------------------------------------------------------
+    # 1. VALIDATION & SETUP
+    # ---------------------------------------------------------
+    try:
+        cfg = config["AzureAIConfig"]
+        key_field = cfg["key_field"]
+        searchable_cols = cfg.get("searchable", [])
+        
+        # Validate Vector Fields
+        vector_fields = cfg.get("vector_fields", {})
+        if not vector_fields:
+            raise ValueError("Configuration Error: 'vector_fields' must be defined in AzureAIConfig.")
+        
+        vector_field_name = list(vector_fields.keys())[0]  # Assumes one vector field
+        
+        # Validate Embedding Model Config
+        hist_config = config.get("historical_data_filter_and_retrieval", {})
+        # emb_model = hist_config.get("embedding_model")
+        emb_model = os.getenv('AZURE_OPENAI_MODEL_embed')
+        if not emb_model:
+            raise KeyError("Configuration Error: 'AZURE_OPENAI_MODEL_embed' is missing in Env Variables.")
+
+    except (KeyError, ValueError, TypeError) as e:
+        logger.error(f"Initialization Failed to store data in Azure AI Search: {e}")
+        raise  # Critical error: Cannot proceed without valid config
+
+    batch_size = 100
+    total_new = 0
+    total_skipped = 0
+    failed_batches = 0
+    
+    total_rows = len(df)
+    logger.info(f"Starting batch processing for {total_rows} rows...")
+
+    # ---------------------------------------------------------
+    # 2. BATCH PROCESSING LOOP
+    # ---------------------------------------------------------
+    for i in range(0, total_rows, batch_size):
+        try:
+            # --- Step A: Slice & Prepare ---
+            df_batch = df.iloc[i : i + batch_size].copy()
+            batch_docs = df_batch.to_dict(orient="records")
+            
+            # Filter duplicates
+            docs_to_upload = []
+            for doc in batch_docs:
+                doc_id = str(doc.get(key_field, ""))
+                if doc_id in existing_keys:
+                    total_skipped += 1
+                else:
+                    docs_to_upload.append(doc)
+            
+            if not docs_to_upload:
+                continue
+
+            # --- Step B: Generate Embeddings ---
+            texts_to_embed = []
+            try:
+                for doc in docs_to_upload:
+                    # Robust text combination: Handle None/NaN values safely
+                    text_parts = [str(doc.get(col, "") or "") for col in searchable_cols]
+                    combined_text = " ".join(text_parts).strip()
+                    texts_to_embed.append(combined_text if combined_text else " ")
+
+                response = openai_client.embeddings.create(
+                    input=texts_to_embed,
+                    model=emb_model
+                )
+                embeddings = [list(item.embedding) for item in response.data]
+
+                if len(embeddings) != len(docs_to_upload):
+                    raise ValueError(f"Mismatch: Generated {len(embeddings)} embeddings for {len(docs_to_upload)} docs.")
+
+                # Assign embeddings
+                for doc, emb in zip(docs_to_upload, embeddings):
+                    doc[vector_field_name] = emb
+
+            except Exception as e:
+                tt=i+batch_size
+                logger.error(f"Embedding Failed for batch starting at row {i} and ends at {tt}: {e}")
+                failed_batches += 1
+                continue  # Skip upload for this batch, move to next
+
+            # --- Step C: Upload to Azure Search ---
+            try:
+                res = search_client.upload_documents(documents=docs_to_upload)
+                
+                succeeded = sum(1 for r in res if r.succeeded)
+                failed_in_batch = len(docs_to_upload) - succeeded
+                total_new += succeeded
+                
+                if failed_in_batch > 0:
+                    logger.warning(f"Batch {i//batch_size + 1}: {failed_in_batch} documents failed to index.")
+                else:
+                    logger.info(f"Batch {i//batch_size + 1}: Uploaded {succeeded} new docs.")
+
+            except Exception as e:
+                logger.error(f"Indexing Failed for batch starting at row {i}: {e}")
+                failed_batches += 1
+                # We do not raise here so subsequent batches can still try to process
+
+        except Exception as e:
+            # Catch-all for unexpected dataframe/logic errors in the loop
+            logger.error(f"Unexpected error in batch processing logic at row {i}: {e}")
+            failed_batches += 1
+        
+        finally:
+            # --- Step D: Memory Cleanup ---
+            # Ensure these are deleted even if errors occurred
+            if 'docs_to_upload' in locals(): del docs_to_upload
+            if 'texts_to_embed' in locals(): del texts_to_embed
+            if 'batch_docs' in locals(): del batch_docs
+
+    # ---------------------------------------------------------
+    # 3. SUMMARY & FINAL CHECK
+    # ---------------------------------------------------------
+    logger.info("------------------------------------------------")
+    logger.info(f"Processing Complete.")
+    logger.info(f"Total New Uploads: {total_new}")
+    logger.info(f"Total Skipped:     {total_skipped}")
+    logger.info(f"Failed Batches:    {failed_batches}")
+    logger.info("------------------------------------------------")
+
+    # Optional: Raise error if TOO many batches failed (e.g., system-wide issue)
+    if failed_batches > 0 and total_new == 0:
+        raise RuntimeError("Process completed but ALL batches failed. Check logs for details.")
+
+# ---------------------------------------------------------
+# 5. MAIN ENTRY POINT
+# ---------------------------------------------------------
+
+def main_data_upload(config):
+    """
+    Orchestrates the entire ETL pipeline.
+    """
+    logger.info("Starting Main Data Upload Pipeline...")
+    
+    try:
+        # 1. Environment & Client Setup
+        # We use a get() or os.getenv() check to ensure critical secrets are present
+        blob_conn_str=os.getenv('AzureWebJobsStorage')
+        endpoint = os.getenv("endpoint")
+        admin_key = os.getenv("admin_key")
+        
+        if not endpoint or not admin_key:
+            raise EnvironmentError("Missing 'endpoint' or 'admin_key' environment variables.")
+        ###########################################################################################################
+        # --- Client Initialization (Maintained as per your requirement) ---
+        # from azure.core.pipeline.transport import RequestsTransport
+        # transport = RequestsTransport(connection_verify=False)
+        
+        # index_client = SearchIndexClient(
+        #     endpoint=endpoint, 
+        #     credential=AzureKeyCredential(admin_key), 
+        #     transport=transport
+        # )
+        # search_client = SearchClient(
+        #     endpoint=endpoint, 
+        #     index_name=config["AzureAIConfig"]["index_name"], 
+        #     credential=AzureKeyCredential(admin_key), 
+        #     transport=transport
+        # )
+        # ------------------------------------------------------------------
+        ###########################################################################################################
+        index_client = SearchIndexClient(
+            endpoint=endpoint, 
+            credential=AzureKeyCredential(admin_key)
+        )
+        search_client = SearchClient(
+            endpoint=endpoint, 
+            index_name=config["AzureAIConfig"]["index_name"], 
+            credential=AzureKeyCredential(admin_key)
+        )
+        ###########################################################################################################
+
+        openai_client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_API_KEY_embd"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT_embd"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION_embd")
+        )
+        
+        blob_service = get_blob_service_client(blob_conn_str)
+
+        # 2. Load & Merge Data
+        try:
+            df_final = fetch_and_merge_csvs(blob_service, "historicaldata")
+        except Exception as e:
+            logger.error(f"Failed to fetch or merge CSVs: {e}")
+            raise
+
+        if df_final is None or df_final.empty:
+            logger.info("No data found to process. Exiting gracefully.")
+            return
+
+        # 3. Clean Data
+        df_final = clean_dataframe(df_final, config)
+        if df_final.empty:
+            logger.info("Dataframe is empty after cleaning. Exiting.")
+            return
+
+        # 4. Search Index Setup (Creates index if not exists)
+        try:
+            ensure_index_exists(index_client, config)
+        except Exception as e:
+            logger.error(f"Failed to ensure search index exists: {e}")
+            raise
+
+        # 5. Get Existing Keys (Optimization to prevent redundant embedding/indexing)
+        existing_keys = get_existing_keys(search_client, config["AzureAIConfig"]["key_field"])
+
+        # 6. Process, Embed, Upload (Memory-safe Batched Processing)
+        # Errors within batches are handled inside this function to allow partial success
+        process_batches(df_final, config, openai_client, search_client, existing_keys)
+
+        # 7. Cleanup Blobs
+        # Set replaced_flag based on your specific logic requirements
+        replaced_flag = "yes" 
+        archive_processed_blobs(blob_service, "historicaldata", "consumedhistoricaldata", replaced_flag)
+
+        logger.info("Main Data Upload Pipeline completed successfully.")
+
+    except Exception as e:
+        logger.critical(f"Pipeline failed with a critical error: {e}", exc_info=True)
+        # In production, you might want to re-raise or trigger an alert here
+        raise ValueError(f"Data upload to Azure AI Search Pipeline failed with a critical error: {e}")
