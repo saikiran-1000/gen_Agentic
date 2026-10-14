@@ -1,0 +1,64 @@
+"""Tax Code Identification Main Processing Module.
+
+This module serves as the main entry point for processing invoice and tax code identification. It orchestrates the complete workflow including input validation, invoice processing with AI-powered recommendations, and output validation.
+"""
+
+import logging
+from typing import Any, Dict
+
+# from dotenv import load_dotenv
+
+from input_validation import input_validation
+from output_validation import output_validation
+from identify_taxcode import identify_taxcode 
+
+
+# load_dotenv()
+
+
+def main(input_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """ Process invoice tax code identification.
+        This function orchestrates the complete workflow for tax code identification,  
+        including input validation, tax code identification processing, and output validation.  
+
+        Args:  
+            input_data (Dict[str, Any]): The invoice data to be processed.  
+            config (Dict[str, Any]): Configuration parameters for processing.  
+
+        Returns:  
+            Dict[str, Any]: The processed invoice with tax code identification results,  
+                            or an error message and status if processing fails.  
+    """  
+    logging.info(f"Processing input: {input_data}")
+
+    try:
+        validated_data = input_validation(input_data, config=config)
+    except ValueError as e:
+        logging.error(f"Input validation error: {e}")
+        return {
+            "error": str(e),
+            "status": "Input validation failed"
+        }
+
+    try:
+        processed_invoice = identify_taxcode(validated_data, config=config)
+    except ValueError as e:
+        logging.error(f"Invoice processing error: {e}")
+        return {
+            "error": str(e),
+            "status": "Invoice processing failed"
+        }
+
+    # Step 3: Validate final output format and structure
+    try:
+        output_validation(processed_invoice)
+    except ValueError as e:
+        logging.error(f"Output validation error: {e}")
+        return {
+            "error": str(e),
+            "status": "Output validation failed"
+        }
+
+    # return processed_invoice
+    return {"status": "success","status_code":200, "data": processed_invoice}
+    
