@@ -1,0 +1,247 @@
+from semantic_kernel.functions import kernel_function
+import re
+import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
+import logging
+from collections import Counter
+logger = logging.getLogger(__name__)
+
+class RuleBasedPlugin:
+    def __init__(self, config=None):
+        self.config_from_json = config or {}
+        self.inv_desc_fields = self.config_from_json.get("INV_DESC_FIELD", [])
+        self.inv_non_desc_fields = self.config_from_json.get("INV_NON_DESC_FIELDS", [])
+        self.inv_line_id_field = self.config_from_json.get("INV_LINE_ID_FIELD")
+
+        self.po_desc_fields = self.config_from_json.get("PO_DESC_FIELD", [])
+        self.po_non_desc_fields = self.config_from_json.get("PO_NON_DESC_FIELDS", [])
+        self.po_line_id_field = self.config_from_json.get("PO_LINE_ID_FIELD")
+        self.drop_duplicate = self.config_from_json.get("DROP_DUPLICATE")
+        # ADD THIS VALIDATION
+        if not self.inv_line_id_field:
+            raise ValueError("INV_LINE_ID_FIELD is required in configuration")
+        if not self.po_line_id_field:
+            raise ValueError("PO_LINE_ID_FIELD is required in configuration")
+        
+    @kernel_function(
+        name="match_invoices_to_pos",
+        description="Performs simple rule-based matching between invoice and PO lines"
+    )
+    def match_invoices_to_pos(self, inv_df, po_df):
+        """Match invoice lines to PO lines based on item_id.
+        Input:
+            invoice_lines: List of invoice line detail
+            po_lines: List of po line detail
+        Return:
+            invl: List of invoice line detail which are not tagged.
+            pol: List if PO Lines detail which are not tagged.
+            tagged_lines: List of json, (output which will directly added to final response of multiagent)
+            tagged_lines_format:{invoice_line_identifier: ...,
+                                 poline_identifier: ...,
+                                 matching percent: 100,
+                                 matching reason: which field of invoice line matches with which field of pol}
+        
+        """
+        try:
+            logger.info("==== RULES BASED PLUGIN ====")
+            def clean_text(val):
+                try:
+                    if isinstance(val, str):
+                        return re.sub(r'[^A-Za-z0-9]', '', val).lower()
+                    return val
+                except Exception as e:
+                    raise ValueError(f"Error in rule based agent clean text: {e}")
+            if isinstance(inv_df, list):
+                # inv_df = pd.DataFrame(inv_df)
+                inv_df = pd.DataFrame(inv_df).fillna("N/A")
+                inv_df["index"] = list(range(len(inv_df)))
+
+            if isinstance(po_df, list):
+                # po_df = pd.DataFrame(po_df)
+                po_df = pd.DataFrame(po_df).fillna("N/A")
+                po_df["index"] = list(range(len(po_df)))
+            logger.info(f"RULLLESSSSS {type(inv_df)} {type(po_df)}")
+
+            inv_df = inv_df.astype(str)
+            po_df = po_df.astype(str)
+            inv_df1 = inv_df.applymap(clean_text)
+            po_df1 = po_df.applymap(clean_text)
+            temp_col_list = [col for col in po_df.columns if col != "index"]
+            # inv_df1.to_csv("inv_df.csv",index=False)
+            # po_df1.to_csv("po_df.csv",index=False)
+
+            # Get unique values for invoice non-description fields
+            inv_unique = {}
+            for field in self.inv_non_desc_fields:
+                if field in inv_df1.columns:
+                    inv_unique[field] = [str(x) for x, count in inv_df1[field].value_counts().items() if count == 1 and x != "na"]
+            
+            # Get unique values for PO non-description fields
+            po_unique = {}
+            for field in self.po_non_desc_fields:
+                if field in po_df1.columns:
+                    po_unique[field] = [str(x) for x, count in po_df1[field].value_counts().items() if count == 1 and x != "na"]
+            
+            # Get unique values for PO description fields
+            po_desc_unique = {}
+            for field in self.po_desc_fields:
+                if field in list(po_df1.columns):
+                    po_desc_unique[field] = [str(x) for x, count in po_df1[field].value_counts().items() if count == 1 and x != "na"]
+
+            rule_check_inv = []
+            rule_check_po = []
+            rule_check_reason = []
+
+            for (idx1, row1), (idx2, row2) in zip(inv_df1.iterrows(), inv_df.iterrows()):
+                matched = False
+                
+                # Get invoice field values
+                inv_field_values = {}
+                for field in self.inv_non_desc_fields:
+                    if field in inv_df1.columns:
+                        inv_field_values[field] = str(row1[field])
+                
+                inv_desc_values = {}
+                for field in self.inv_desc_fields:
+                    if field in list(inv_df1.columns):
+                        inv_desc_values[field] = str(row1[field])
+                
+                for inv_field in self.inv_non_desc_fields:
+                    if matched:
+                        break  # If already matched, skip remaining fields
+                        
+                    # Skip if field doesn't exist in current row or doesn't have unique values
+                    if inv_field not in row1 or inv_field not in inv_unique:
+                        continue
+                        
+                    inv_value = str(row1[inv_field])  
+                    
+                    # Skip if this value is not unique in invoice data
+                    if inv_value not in inv_unique[inv_field]:
+                        continue
+                    
+                    # RULE 1: EXACT FIELD MATCHING
+                    # Try to match invoice field value with each PO non-description field
+                    for po_field in self.po_non_desc_fields:
+                        if matched:
+                            break  # If already matched, skip remaining PO fields
+                            
+                        # Check if this PO field has unique values and contains our invoice value
+                        if po_field in po_unique and inv_value in po_unique[po_field]:
+                            # Find PO rows that match this value
+                            po_match_df = po_df1[po_df1[po_field] == inv_value]
+                            
+                            if not po_match_df.empty:
+                                po_idx = po_match_df["index"].iloc[0]
+                                
+                                # SECONDARY VALIDATION: Check other fields for consistency
+                                valid_match = True
+                                
+                                # For each other invoice non-description field
+                                for other_inv_field in self.inv_non_desc_fields:
+                                    if other_inv_field != inv_field and other_inv_field in row1:
+                                        other_inv_value = str(row1[other_inv_field])
+                                        
+                                        # Skip if value is "n/a"
+                                        if other_inv_value != "na":
+                                            # Check corresponding PO fields
+                                            for other_po_field in self.po_non_desc_fields:
+                                                if other_po_field != po_field and other_po_field in po_match_df.columns:
+                                                    other_po_value = str(po_match_df[other_po_field].iloc[0])
+                                                    
+                                                    # If values match, ensure PO value is unique
+                                                    if other_po_value!="na":
+                                                        if other_inv_value == other_po_value:
+                                                            if other_po_field not in po_unique or other_po_value not in po_unique[other_po_field]:
+                                                                valid_match = False
+                                                                break
+                                                        # If values don't match, PO value should still be unique
+                                                        else:
+                                                            if other_po_field not in po_unique or other_po_value not in po_unique[other_po_field]:
+                                                                valid_match = False
+                                                                break
+                                                if not valid_match:
+                                                    break
+                                        if not valid_match:
+                                            break
+                                
+                                # If validation passed, record the match
+                                if valid_match:
+                                    rule_check_inv.append(row2[self.inv_line_id_field])
+                                    rule_check_po.append(po_df.loc[po_df["index"] == po_idx, self.po_line_id_field].iloc[0])
+                                    rule_check_reason.append(f"Invoice {inv_field} matches with PO {po_field}")
+                                    matched = True
+                                    break
+                    
+                    # RULE 2: DESCRIPTION FIELD MATCHING
+                    # If no exact match found, check if invoice value appears in PO description fields
+                    if not matched:
+                        for po_desc_field in self.po_desc_fields:
+                            if po_desc_field in list(po_desc_unique):
+                                presence_count = 0
+                                temp_desc = ""
+                                
+                                # Check how many PO description values contain our invoice value
+                                for desc in po_desc_unique[po_desc_field]:
+                                    if inv_value in desc:  # Substring match
+                                        presence_count += 1
+                                        temp_desc = desc
+                                
+                                # Only proceed if invoice value appears in exactly one PO description
+                                # This avoids ambiguous matches
+                                if presence_count == 1:
+                                    po_match_df = po_df1[po_df1[po_desc_field] == temp_desc]
+                                    if not po_match_df.empty:
+                                        po_idx = po_match_df["index"].iloc[0]
+                                        rule_check_inv.append(row2[self.inv_line_id_field])
+                                        rule_check_po.append(po_df.loc[po_df["index"] == po_idx, self.po_line_id_field].iloc[0])
+                                        rule_check_reason.append(f"Invoice {inv_field} found in PO {po_desc_field}")
+                                        matched = True
+                                        break
+                    
+                if matched:
+                    continue
+
+            po_counts = Counter(rule_check_po)
+
+            filtered_pairs = [
+                (inv, po)
+                for inv, po in zip(rule_check_inv, rule_check_po)
+                if po_counts[po] == 1
+            ]
+
+            if filtered_pairs:
+                rule_check_inv, rule_check_po = map(list, zip(*filtered_pairs))
+            else:
+                rule_check_inv, rule_check_po = [], []
+
+
+            rem_inv_data = inv_df[~inv_df[self.inv_line_id_field].isin(rule_check_inv)]
+            rem_po_data = po_df[~po_df[self.po_line_id_field].isin(rule_check_po)]
+            if self.drop_duplicate.lower()=="yes":
+                logger.info(f"BEFORE REMOVING DUPLICATES, TOTAL PO LINES: {rem_po_data.shape[0]}")
+                rem_po_data = rem_po_data.drop_duplicates(subset=temp_col_list)
+                logger.info(f"AFTER REMOVING DUPLICATES, REMAINING PO LINES LEFT: {rem_po_data.shape[0]}")
+            logger.info(f"INVL: {inv_df.shape[0]}, REM_INVL: {rem_inv_data.shape[0]}, MATCHED NO.: {len(rule_check_inv)}")
+            logger.info(f"POL: {po_df.shape[0]}, REM_POL: {rem_po_data.shape[0]}, MATCHED NO.: {len(rule_check_po)}")
+            rem_inv_data = rem_inv_data.drop(columns=["index"], errors="ignore")
+
+            # convert to list of dicts
+            rem_inv_data_list = rem_inv_data.to_dict(orient="records")
+            rem_po_data = rem_po_data.drop(columns=["index"], errors="ignore")
+
+            # convert to list of dicts
+            rem_po_data_list = rem_po_data.to_dict(orient="records")
+            op= {
+                "remaining_invoice_data": rem_inv_data_list,
+                "rule_check_invoice": rule_check_inv,
+                "remaining_po_data": rem_po_data_list,
+                "rule_check_po": rule_check_po,
+                "rule_check_reason": rule_check_reason
+            }
+            logger.info(f"Final rule based agent output: {op}")
+            return op
+            # return rem_inv_data, rule_check_inv, rem_po_data, rule_check_po, rule_check_reason
+        except Exception as e:
+            raise ValueError(f"Error in rule based agent: {e}")
