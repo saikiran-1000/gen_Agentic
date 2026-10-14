@@ -1,0 +1,90 @@
+"""LLM integration module for GRN variance analysis.
+
+This module provides Azure OpenAI integration for generating justifications
+for variance analysis in invoice GRN processing. It handles API calls,
+response validation, and structured output formatting.
+"""
+
+import logging
+import os
+from typing import Tuple
+
+from openai import AzureOpenAI
+
+logger = logging.getLogger(__name__)
+
+
+def get_azure_openai_client() -> AzureOpenAI:
+    """Create and return an Azure OpenAI client instance.
+
+    This function initializes an Azure OpenAI client using environment variables for endpoint, API key, and API version configuration.
+
+    Returns:
+        AzureOpenAI: Configured Azure OpenAI client instance.
+        
+    Raises:
+        ValueError: If required environment variables are not set.
+    """
+    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+    
+    if not azure_endpoint:
+        logger.error("AZURE_OPENAI_ENDPOINT environment variable is not set")
+        raise ValueError("##GRN-VARIANCE-ERROR## AZURE_OPENAI_ENDPOINT environment variable is not set")
+    if not api_key:
+        logger.error("AZURE_OPENAI_API_KEY environment variable is not set")
+        raise ValueError("##GRN-VARIANCE-ERROR## AZURE_OPENAI_API_KEY environment variable is not set")
+    if not api_version:
+        logger.error("AZURE_OPENAI_API_VERSION environment variable is not set")
+        raise ValueError("##GRN-VARIANCE-ERROR## AZURE_OPENAI_API_VERSION environment variable is not set")
+
+    logger.info("Azure OpenAI client initialized successfully")
+
+    return AzureOpenAI(
+        azure_endpoint=azure_endpoint,
+        api_key=api_key,
+        api_version=api_version,
+    )
+
+
+def get_azure_openai_response(system_prompt: str, user_prompt: str) -> Tuple[str, int]:
+    """Call Azure OpenAI chat completion API and return response content and token count.
+
+    This function sends a prompt to Azure OpenAI's chat completion API with
+    predefined system instructions for GRN variance analysis.
+
+    Args:
+        system_prompt (str): The system prompt to send to the Azure OpenAI model.
+        user_prompt (str): The user prompt containing invoice and GRN details.
+
+    Returns:
+        Tuple[str, int]: A tuple containing the response content and total token count.
+    """
+    client = get_azure_openai_client()
+
+    model = os.getenv("AZURE_OPENAI_MODEL")
+    if not model:
+        logger.error("AZURE_OPENAI_MODEL environment variable is not set")
+        raise ValueError("##GRN-VARIANCE-ERROR## AZURE_OPENAI_MODEL environment variable is not set")
+
+    logger.info(f"Making Azure OpenAI API call with model: {model}")
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature = 1,
+            max_completion_tokens = 8192
+        )
+        logger.info(f"Azure OpenAI API call successful. Total tokens used: {response.usage.total_tokens}")
+    except Exception as e:
+        logger.error(f"Azure OpenAI API call failed: {str(e)}", exc_info=True)
+        error_message = f"##GRN-VARIANCE-ERROR## Error in chat completion request: {e}"
+        raise ValueError(error_message) from e
+
+    # Return output tokens and content
+    return response.choices[0].message.content, response.usage.total_tokens
