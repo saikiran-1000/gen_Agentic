@@ -1,0 +1,129 @@
+import json
+import logging
+from typing import Dict, List
+
+from agents.plugins.salesforce_plugin import SalesforceStatusPlugin
+
+logger = logging.getLogger(__name__)
+
+
+class FinalOutputProcessor:
+
+    def __init__(self, kernel, credentials, config_path, salesforce_plugin):
+        """
+        credentials: any credentials object
+        config_path: path to config JSON file
+        salesforce_plugin: Semantic Kernel plugin object (class instance)
+        """
+        self.credentials = credentials
+        self.config = config_path
+        self.salesforce_plugin = salesforce_plugin
+        self.kernel = kernel
+        # -------------------------
+        # Load dynamic config keys
+        # -------------------------
+        self.source_inv_key = self.config["INV_LINE_ID_FIELD"]
+        self.source_po_key = self.config["PO_LINE_ID_FIELD"]
+        self.mapping = self.config["map_for_final_output"]
+
+        self.target_inv_field = self.mapping[self.source_inv_key]
+        self.target_po_field = self.mapping[self.source_po_key]
+
+    async def process(self, payload: Dict) -> List[Dict]:
+        """
+        payload format:
+        {
+            'input_data': [...],
+            'extraParams': {
+                'untaggedPOLines': 'POL-00115023,POL-00115024'
+            }
+        }
+        """
+        input_rows = payload.get("input_data", [])
+        extra_params = payload.get("extraParams", {})
+
+        filtered_rows = []
+        dropped_rows = []
+
+        # -------------------------------
+        # STEP 1 — Filter Null rows
+        # -------------------------------
+        for row in input_rows:
+            inv = row.get(self.target_inv_field)
+            po = row.get(self.target_po_field)
+
+            if inv in [None, "", "null", "None"] or po in [None, "", "null", "None"]:
+                dropped_rows.append(row)
+            else:
+                filtered_rows.append(row)
+
+        # Edge case: nothing to send to Salesforce
+        if len(filtered_rows) == 0:
+            logger.warning("No valid rows found. Returning all dropped rows with Status=False.")
+            for r in dropped_rows:
+                r["Status"] = "False"
+            return dropped_rows
+
+        # -------------------------------
+        # STEP 2 — Build invlIdVsPolIdMap
+        # -------------------------------
+        try:
+            invl_map = {
+                row[self.target_inv_field]: row[self.target_po_field]
+                for row in filtered_rows
+            }
+        except Exception as e:
+            logger.error(f"Error forming invlIdVsPolIdMap: {e}")
+            raise e
+
+        # Final input structure for Salesforce plugin
+        salesforce_input = {
+            "invlIdVsPolIdMap": invl_map,
+            "extraParams": extra_params
+        }
+
+        # -------------------------------
+        # STEP 3 — CALL SALESFORCE PLUGIN
+        # -------------------------------
+        
+        try:
+            sf_response = await self.kernel.invoke(
+            plugin_name="SalesforceStatusPlugin",
+            function_name="call_salesforce_validation_api",
+            input_json=salesforce_input
+            )
+        except Exception as e:
+            logger.error(f"Salesforce plugin call failed: {e}")
+            # Mark all as False on error
+            for r in filtered_rows:
+                r["Status"] = "False"
+            for r in dropped_rows:
+                r["Status"] = "False"
+            return filtered_rows + dropped_rows
+
+        # Salesforce output is dict like:
+        if hasattr(sf_response, "value"):
+            sf_status_map = sf_response.value
+        else:
+            sf_status_map = sf_response
+
+        # -------------------------------
+        # STEP 4 — Merge Status
+        # -------------------------------
+        final_output = []
+
+        for row in filtered_rows:
+            inv = row[self.target_inv_field]
+            status = sf_status_map.get(inv, "False")
+            enriched = row.copy()
+            enriched["Status"] = status
+            final_output.append(enriched)
+
+        # Add dropped rows
+        for row in dropped_rows:
+            enriched = row.copy()
+            enriched["Status"] = "False"
+            final_output.append(enriched)
+
+        return final_output
+
