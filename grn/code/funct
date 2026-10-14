@@ -1,0 +1,233 @@
+import azure.functions as func
+import os
+import time
+import logging
+import json
+from sql_query import main_sql
+# from main import main
+from parallel_call import main_parallel
+from variance_month import main_trend
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+logger = logging.getLogger(__name__)
+##################################################################################################
+## add
+
+from azure.storage.blob import BlobServiceClient
+blob_connection_string = os.getenv('AzureWebJobsStorage')
+def get_blob_service_client(blob_connection_string):
+    # Initialize BlobServiceClient
+    blob_client = BlobServiceClient.from_connection_string(blob_connection_string)
+    logger.info(f"blob_service_client, {blob_client}")
+    return blob_client
+
+blob_service_client = get_blob_service_client(blob_connection_string)
+
+# ----------------------------------
+# FETCH (download config.json)
+# ----------------------------------
+def fetch_config(container_name, blob_name):
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(blob_name)
+
+        # Download blob content
+        download_stream = blob_client.download_blob()
+        config_data = download_stream.readall()
+
+        # Parse JSON string to dict
+        config_dict = json.loads(config_data)
+        logger.info(f"Fetched {blob_name} from {container_name}")
+        return config_dict
+    except Exception as e:
+        logger.error(f"Error fetching config: {e}")
+        return None
+
+
+##################################################################################################
+
+
+@app.route(route="gr_variance")
+def gr_variance(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("Python HTTP trigger function started processing a request.")
+
+    if req.method != "POST":
+        return func.HttpResponse("Only POST method is supported.", status_code=405)
+
+    # ---- Parse request ----
+    try:
+        test_data = req.get_json()
+        logging.info(f"Data received for inferencing: {test_data}")
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 400, "message": "Invalid JSON format"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    if not test_data:
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 400, "message": "No data found for inferencing"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+    try:
+        container = "grnconfig"
+        blob = "config.json"
+
+        # Fetch / Download
+        config = fetch_config(container, blob)
+    except Exception as e:
+        return func.HttpResponse(
+            json.dumps({"status": "error", "status_code": 400, "message": f"Error while loading config.json from container {container} - {e}"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+    
+
+    logging.info(f"Loaded config: {config}")
+
+    if config==None:
+        error_resp = {
+            "status": "error",
+            "status_code": 500,
+            "message": f"No config file found"
+        }
+        return func.HttpResponse(
+            json.dumps(error_resp),
+            status_code=500,
+            mimetype="application/json"
+        )
+    # ---- SQL QUERY ----
+    start_time1=time.time()
+    try:
+        result = main_sql(test_data, config)
+        if not isinstance(result, dict) or result.get("status") != "success":
+            error_message = result.get("message", "Unknown error") if isinstance(result, dict) else "Invalid result"
+            logging.error(f"SQL execution failed: {error_message}")
+            final_response = {
+                "status": "error",
+                "status_code": result.get("status_code", 500) if isinstance(result, dict) else 500,
+                "message": f"Issue found in SQL query execution: {error_message}"
+            }
+            return func.HttpResponse(json.dumps(final_response), status_code=final_response["status_code"], mimetype="application/json")
+
+        logging.info("SQL query execution completed successfully.")
+        temp_data = result["data"]
+        logger.info(f"SQL Result Data: {temp_data}")
+
+    except Exception as e:
+        logging.exception(f"Unexpected error during SQL execution: {e}")
+        final_response = {"status": "error", "status_code": 500, "message": f"Issue found in SQL query execution: {str(e)}"}
+        return func.HttpResponse(json.dumps(final_response), status_code=500, mimetype="application/json")
+    end_time1=time.time()
+    total_time1=end_time1-start_time1
+    logging.info(f"------------Time taken to add historical data: {total_time1}")
+    try:
+        line_detail_identifier=config.get("invoice_line_field_name")
+        batch_size=config.get("batch_size_for_parellel_processing")
+        op=main_parallel(temp_data, line_detail_identifier, batch_size, config)
+        if not isinstance(op, dict) or op.get("status") != "success":
+            error_message = op.get("message", "Unknown error") if isinstance(op, dict) else "Invalid result"
+            logging.error(f"Parallel call failed: {error_message}")
+            final_response = {
+                "status": "error",
+                "status_code": op.get("status_code", 500) if isinstance(op, dict) else 500,
+                "message": f"Issue found in Parallel call execution: {error_message}"
+            }
+            return func.HttpResponse(json.dumps(final_response), status_code=final_response["status_code"], mimetype="application/json")
+        ######################################
+        llm1_result = temp_data.get(line_detail_identifier)[0].get("result")
+        llm1_data = llm1_result.get("data")
+
+        # Log what LLM returned
+        # logger.info(f"LLM 1 input: {llm1_result}")
+
+        # If data is None or empty → return error response
+        if not llm1_data:
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "error",
+                    "status_code": 500,
+                    "message": f"Issue in LLM callout, getting this from LLM layer: {llm1_result}"
+                }),
+                status_code=500,
+                mimetype="application/json"
+            )
+        ######################################
+        ires=[]
+        temp_dict=llm1_data.copy()
+        for item in temp_data.get(line_detail_identifier):
+            ires.extend(item.get("result").get("data").get("invoiceLineItemsResults"))
+            # iitems.extend(item.get("result").get("data").get("invoiceLineItems"))
+        temp_dict_keys=list(temp_dict.keys())
+        output_data = {}
+        for key in temp_dict_keys:
+            if key=="invoiceLineItemsResults":
+                output_data[key]=ires
+                continue
+            # if key=="invoiceLineItems":
+            #     output_data[key]=iitems
+            #     continue
+            output_data[key]=temp_dict[key]
+        logging.info("SQL query execution completed successfully.")
+
+    except Exception as e:
+        logging.exception(f"Unexpected error during parallel call: {e}")
+        error_resp = {
+            "status": "error",
+            "status_code": 500,
+            "message": f"Issue found in parallel call: {str(e)}"
+        }
+        return func.HttpResponse(
+            json.dumps(error_resp),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    
+    try:
+        start_time3=time.time()
+        final_response = main_trend(output_data, temp_data, config)
+        if not isinstance(final_response, dict):
+            raise ValueError("main_trend() did not return a valid dictionary.")
+
+        if final_response.get("status") != "success":
+            error_message = final_response.get("message", "Unknown error")
+            logging.error(f"Trend analysis execution failed: {error_message}")
+            error_resp = {
+                "status": "error",
+                "status_code": final_response.get("status_code", 500),
+                "message": f"Issue found in trend analysis execution: {error_message}"
+            }
+            return func.HttpResponse(
+                json.dumps(error_resp),
+                status_code=error_resp["status_code"],
+                mimetype="application/json"
+            )
+        final_response["data"]["status"]=final_response["status"]
+        final_response["data"]["status_code"]=final_response["status_code"]
+        logging.info("Trend analysis completed successfully.")
+        end_time3=time.time()
+        total_time3=end_time3-start_time3
+        logging.info(f"------------Time taken to add trend: {total_time3}")
+        # final_response["historical_data"] = temp_data
+        # final_response["output_data"] = output_data
+        return func.HttpResponse(
+            json.dumps(final_response["data"]),
+            # json.dumps(final_response),
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+        logging.exception(f"Unexpected error during trend analysis execution: {e}")
+        error_resp = {
+            "status": "error",
+            "status_code": 500,
+            "message": f"Issue found in trend analysis execution: {str(e)}"
+        }
+        return func.HttpResponse(
+            json.dumps(error_resp),
+            status_code=500,
+            mimetype="application/json"
+        )
