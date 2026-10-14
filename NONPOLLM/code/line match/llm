@@ -1,0 +1,80 @@
+"""
+LLM integration module for NON PO Invoice Coding for Line Description Matching.
+This module provides Azure OpenAI integration for identifying GL categories
+for each line description present in the input invoice.
+It handles API calls, response validation, and structured output formatting.
+"""
+import logging
+import os
+from typing import Tuple, Dict, Any
+
+from openai import AzureOpenAI, APIError, RateLimitError, OpenAIError
+
+logger = logging.getLogger(__name__)
+
+def get_azure_openai_client() -> AzureOpenAI:
+    """
+    Create and return an Azure OpenAI client instance.
+    Initializes an Azure OpenAI client using environment variables
+    for endpoint, API key, and API version configuration.
+    Returns:
+        AzureOpenAI: Configured Azure OpenAI client instance.
+    """
+    return AzureOpenAI(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT_linedesc"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY_linedesc"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION_linedesc"),
+    )
+
+def get_azure_openai_response(system_prompt: str, user_prompt: str,config: Dict[str, Any]) -> Tuple[str, int]:
+    """
+    Call Azure OpenAI chat completion API and return response content and token count.
+    Sends a prompt to Azure OpenAI's chat completion API with predefined system
+    instructions for Non-PO Coding.
+    Args:
+        system_prompt (str): The system prompt to guide the LLM for Non-PO Coding.
+        user_prompt (str): The user prompt with specific invoice context.
+    Returns:
+        Tuple[str, int]: A tuple containing the response content and total token count.
+    Raises:
+        ValueError: If the API call fails or the response is invalid.
+    """
+    client = get_azure_openai_client()
+    logger.info("Calling Azure OpenAI chat completion API for Line Description Matching.")
+    try:
+        response = client.chat.completions.create(
+            model=os.getenv("AZURE_OPENAI_MODEL_linedesc"),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_completion_tokens=4000,
+            reasoning_effort= config.get("model_type_for_llm2")
+        )
+        logger.info("Azure OpenAI chat completion API call successful for Line Description Matching.")
+    except (APIError, RateLimitError, OpenAIError) as e:
+        logger.exception("Azure OpenAI chat completion request failed with OpenAI error for Line Description Matching.")
+        error_message = (
+            f"##NON-PO-CODING-LINE-DESCRIPTION-MATCHING-ERROR## Error in chat completion request: {e}"
+        )
+        raise ValueError(error_message) from e
+    except Exception as e:
+        logger.exception("Unexpected error during Azure OpenAI chat completion request for Line Description Matching.")
+        error_message = (
+            f"##NON-PO-CODING-LINE-DESCRIPTION-MATCHING-ERROR## Unexpected error in chat completion request: {e}"
+        )
+        raise ValueError(error_message) from e
+
+    try:
+        content = response.choices[0].message.content
+        token_count = response.usage.total_tokens
+        logger.info("Azure OpenAI API response parsed successfully for Line Description Matching.")
+    except (IndexError, AttributeError) as api_error:
+        logger.exception("Azure OpenAI API response structure is unexpected for Line Description Matching.")
+        error_message = (
+            f"##NON-PO-CODING-LINE-DESCRIPTION-MATCHING-ERROR## Invalid response format from Azure OpenAI: {api_error}"
+        )
+        raise ValueError(error_message) from api_error
+
+    logger.debug(f"OpenAI response content for Line Description Matching: {content}")
+    return content, token_count
