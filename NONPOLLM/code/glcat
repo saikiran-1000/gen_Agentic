@@ -1,0 +1,544 @@
+import os
+from openai import AzureOpenAI
+from azure.search.documents import SearchClient
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents.models import VectorizedQuery
+from typing import List, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+def transform_input_data(input_data: dict, mapping: dict) -> dict:
+    """
+    Transform input_data to a new schema based on the mapping provided.
+    Handles both top-level and nested (invoiceLineItems) mappings.
+    Keeps unmapped keys like 'glCategories' intact.
+    """
+    try:
+        transformed = {}
+
+        # Handle top-level fields
+        for old_key, new_key in mapping.items():
+            if old_key != "invoiceLineItems" and old_key in input_data:
+                transformed[new_key] = input_data[old_key]
+
+        # Handle nested invoiceLineItems
+        if "invoiceLineItems" in input_data:
+            nested_items = []
+            for item in input_data["invoiceLineItems"]:
+                new_item = {}
+                for k, v in item.items():
+                    # If there's a mapping, rename the field
+                    if k in mapping:
+                        new_item[mapping[k]] = v
+                    else:
+                        # Keep unmapped keys (like glCategories)
+                        new_item[k] = v
+                nested_items.append(new_item)
+
+            # Rename the parent key
+            transformed[mapping["invoiceLineItems"]] = nested_items
+
+        return transformed
+
+    except Exception as e:
+        raise RuntimeError(f"Error while transforming input_data: {e}")
+
+
+# def fetch_historical_data_for_invoice_line(client, search_client, input_data, config):
+def fetch_historical_data_for_invoice_line(client, search_client, invl, input_data, config):
+    """
+    Fetch historical data from Azure AI Search for each invoice line item across all GL categories.
+    No vendor ID filtering - only GL category based filtering.
+    
+    Args:
+        client: Azure OpenAI client for generating embeddings.
+        search_client: Azure Search client instance.
+        invl(dict): A single line info.
+        input_data (dict): Input containing invoiceLineItemsResults.
+        config (dict): Configuration containing column mappings and extraction fields.
+    
+    Returns:
+        list[dict]: Enhanced invoice line items with historical data per GL category.
+    """
+    try:
+        
+        input_data_field_mapping = config.get("input_data_field_mapping")
+        logger.info(f"Starting historical data fetch for invoice line: {invl.get(input_data_field_mapping.get('invline_identifier'))}")
+
+        all_gl_categories = list(set(invl.get("glCategories",[])))
+        input_data_to_historical_data_field_mapping = config.get("historical_data_filter_and_retrieval").get("input_data_to_historical_data_field_mapping")
+        logger.info(f"Found {len(all_gl_categories)} unique GL categories: {all_gl_categories}")
+        ###############################################################################################################
+        ################### Step 1: query formation #########################
+        query_config=config.get("historical_data_filter_and_retrieval").get("apply_filter_on_this_fields")
+        # config.get("historical_data_filter_and_retrieval").get("apply_filter_on_this_fields")
+        azure_ai_mapping=config.get("historical_data_filter_and_retrieval").get("input_data_to_historical_data_field_mapping")
+        query={}
+        filter_key=[]
+        search_key=[]
+        filterable_config=config.get("AzureAIConfig").get("filterable")
+        searchable_config=config.get("AzureAIConfig").get("searchable")
+        for fielditem in query_config.get("header"):
+            if fielditem not in azure_ai_mapping.get("header").keys():
+                raise RuntimeError(f"{fielditem} is not configured properly in input_data_to_historical_data_field_mapping parameter of configuration. Please cross-check that {fielditem} is present in header of both input_data_to_historical_data_field_mapping and apply_filter_on_this_fields")
+            query[azure_ai_mapping.get("header").get(fielditem)]=input_data.get(fielditem)
+            flag=0
+            if azure_ai_mapping.get("header").get(fielditem) in filterable_config:
+                filter_key.append(azure_ai_mapping.get("header").get(fielditem))
+                flag=1
+            if azure_ai_mapping.get("header").get(fielditem) in searchable_config:
+                search_key.append(azure_ai_mapping.get("header").get(fielditem))
+                flag=1
+            if flag!=1:
+                raise RuntimeError(f"{azure_ai_mapping.get("header").get(fielditem)} neither in filterable nor in searchable list.")
+        for fielditem in query_config.get("line_detail"):
+            if fielditem not in azure_ai_mapping.get("line_detail").keys():
+                raise RuntimeError(f"{fielditem} is not configured properly in input_data_to_historical_data_field_mapping parameter of configuration. Please cross-check that {fielditem} is present in line_detail of both input_data_to_historical_data_field_mapping and apply_filter_on_this_fields")
+            query[azure_ai_mapping.get("line_detail").get(fielditem)]=invl.get(fielditem)
+            flag=0
+            if azure_ai_mapping.get("line_detail").get(fielditem) in filterable_config:
+                filter_key.append(azure_ai_mapping.get("line_detail").get(fielditem))
+                flag=1
+            if azure_ai_mapping.get("line_detail").get(fielditem) in searchable_config:
+                search_key.append(azure_ai_mapping.get("line_detail").get(fielditem))
+                flag=1
+            if flag!=1:
+                raise RuntimeError(f"{azure_ai_mapping.get("line_detail").get(fielditem)} neither in filterable nor in searchable list.")
+        query[query_config.get("llm_callout")]=all_gl_categories
+        flag=0
+        if query_config.get("llm_callout") in filterable_config:
+            filter_key.append(query_config.get("llm_callout"))
+            flag=1
+        if query_config.get("llm_callout") in searchable_config:
+            search_key.append(query_config.get("llm_callout"))
+            flag=1
+        if flag!=1:
+            raise RuntimeError(f"{query_config.get("llm_callout")} neither in filterable nor in searchable list.")
+        ###############################################################################################################
+        
+        ################### Step 2: Fetch top 300 records ######################## 
+        # --------------------------------------------------------------
+        # Build Filter + Search Embedding Input
+        # --------------------------------------------------------------
+        filter_clauses = []
+        search_values = []   # text values to generate embeddings for
+
+        for field, value in query.items():
+
+            # CASE 1: FILTER KEYS
+            # gl_filters = " or ".join([f"{gl_field} eq '{gl.replace("'","''")}'" for gl in all_gl_categories])
+            if field in filter_key:
+                if isinstance(value, str):
+                    # exact match
+                    value=value.replace("'","''")
+                    filter_clauses.append(f"{field} eq '{value}'")
+                
+                elif isinstance(value, list):
+                    # OR-based match
+                    value=[v.replace("'","''") for v in value]
+                    or_clause = " or ".join([f"{field} eq '{v}'" for v in value])
+                    filter_clauses.append(f"({or_clause})")
+                
+                else:
+                    raise RuntimeError(f"Unsupported datatype in query for filter field {field}: {value}")
+
+            # CASE 2: SEARCH KEYS (embedding search)
+            if field in search_key:
+                if isinstance(value, str):
+                    search_values.append(value)
+
+                elif isinstance(value, list):
+                    search_values.extend(value)
+
+                else:
+                    raise RuntimeError(f"Unsupported datatype in query for search field {field}: {value}")
+                
+        filter_str = " and ".join(filter_clauses) if filter_clauses else None
+        logger.info(f"QUERY FOR AZURE AI SEARCH: {filter_str}")
+        embedding_input_text = ". ".join(search_values)
+
+        embedding = client.embeddings.create(
+            model=os.getenv('AZURE_OPENAI_MODEL_embed'),
+            input=embedding_input_text
+        ).data[0].embedding
+        # vector_field = list(config.get("AzureAIConfig")["vector_fields"].keys())[0]
+        vector_field="embeddings"
+        # ---------------- VECTOR SEARCH -------------------
+        vector_query = VectorizedQuery(
+            vector=embedding,
+            fields=vector_field,
+            k_nearest_neighbors=config.get("No_of_lineDescription_extract_from_historical_data",100)*4
+        )
+
+        results_iterable = search_client.search(
+            search_text=None,
+            vector_queries=[vector_query],
+            filter=filter_str,
+            select=config.get("AzureAIConfig").get("retrievable"),
+            vector_filter_mode="preFilter",
+            top=config.get("historical_data_filter_and_retrieval").get("No_of_lineDescription_extract_from_historical_data",100)*3
+        )
+
+        results = list(results_iterable)
+        
+        all_historical_records = []
+
+        for result in results:
+            record = {
+                col_name: result[col_name]
+                for col_name in config.get("AzureAIConfig").get("retrievable")
+            }
+            
+            # Correct formatting for 2-decimal score
+            # score = float(result.get("@search.score", 0)) * 100
+            score = float(result.get("@search.score", 0))
+            record["score"] = float(f"{score:.2f}")
+
+            all_historical_records.append(record)
+        
+        logger.info(f"Fetched {len(all_historical_records)} total historical records")
+        
+        ################## ENDS HERE ###################
+        return all_historical_records
+        
+    except Exception as e:
+        logger.exception("Failed to fetch historical data for invoice line items")
+        raise RuntimeError("Historical data fetch failed") from e
+    
+
+def rearrange_historical_data(historical_data,gl_desc):
+    gl_to_records = {}
+    for record in historical_data:
+        gl = record.get(gl_desc)
+        if gl not in gl_to_records:
+            gl_to_records[gl] = []
+        gl_to_records[gl].append(record)
+    return gl_to_records
+
+
+def GLcat_to_lineDesc(input_data, newly_created_gl_desc, gldesc_to_glcode_mapping, desc_to_explaination, config):
+    """
+    Map GL categories to line descriptions without vendor filtering.
+    
+    Args:
+        input_data (dict): Input containing invoiceLineItems.
+        gldesc_to_glcode_mapping (dict): Mapping of GL descriptions to GL codes.
+        desc_to_explaination (list): List of dicts with glCategory and glCategoryExplanation.
+        config (dict): Configuration containing column mappings and extraction fields.
+    
+    Returns:
+        dict: Contains status, llm_data, non_llm_lines, all_lines_for_llm_usecase.
+    """
+    try:
+        logger.info(f"GLcat_to_lineDesc started with {input_data}")
+        desc_to_explaination = {d["glCategory"]: d["glCategoryExplanation"] for d in desc_to_explaination}
+        logger.info("desc_to_explaination created.")
+        mapping = config.get("LLM_to_salesforce_key_mapping", {})
+        input_data_llm = input_data.copy()
+        input_data = transform_input_data(input_data, mapping)
+
+        input_data_to_historical_data_field_mapping = config.get("historical_data_filter_and_retrieval").get("input_data_to_historical_data_field_mapping")
+        input_data_field_mapping = config.get("input_data_field_mapping")
+        index_name = config.get("AzureAIConfig").get("index_name")
+
+        # # Setup Azure clients
+        endpoint = os.getenv("endpoint")
+        admin_key = os.getenv("admin_key")
+        api_key = os.getenv("AZURE_OPENAI_API_KEY_embd")
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT_embd")
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION_embd")
+        # print(input_data)
+        ##########################################################################################
+        search_client = SearchClient(endpoint=endpoint, index_name=index_name, credential=AzureKeyCredential(admin_key))
+        # ############################### For local ###############################################
+        # from azure.core.pipeline.transport import RequestsTransport
+        # transport = RequestsTransport(connection_verify=False)
+        # index_name=config.get("AzureAIConfig").get("index_name")
+        # search_client = SearchClient(endpoint=endpoint, index_name=index_name, credential=AzureKeyCredential(admin_key),transport=transport)
+        # #########################################################################################
+
+        logger.info("search_client created.")
+        # ##############
+        client = AzureOpenAI(api_key=api_key, azure_endpoint=azure_endpoint, api_version=api_version)
+        
+        all_lines_for_llm_usecase = {}
+        llm_lines_only = []
+        non_llm_lines = []
+        total_lines = 0
+        
+        # Process each invoice line item
+        for invl in input_data.get(input_data_field_mapping.get('invls_detail'), []):
+            glcat_list = invl.get("glCategories", [])
+
+            invoice_line_id = invl.get(input_data_field_mapping.get('invline_identifier'))
+            historical_data = fetch_historical_data_for_invoice_line(client, search_client, invl, input_data, config)
+            # if new gl category exist in the glcategories list then its cnfidence score will be low
+            invl["low_confidence"] = {"present":"False","gl_desc":[]}
+
+            for new_cat in newly_created_gl_desc:
+                if new_cat in invl.get("glCategories"):
+                    invl["low_confidence"]["present"] = "True"
+                    invl["low_confidence"]["gl_desc"].append(new_cat)
+                    # break
+            
+            if not isinstance(glcat_list, list):
+                logger.warning(f"GL categories not a list for invoice line: {invl}")
+                continue
+
+            glcat_list_from_history = [d.get(config.get("historical_data_filter_and_retrieval").get("apply_filter_on_this_fields").get("llm_callout")) for d in historical_data if config.get("historical_data_filter_and_retrieval").get("apply_filter_on_this_fields").get("llm_callout") in d]
+            glcat_list_from_history = list(dict.fromkeys(glcat_list_from_history))
+            arranged_hist_data=rearrange_historical_data(historical_data=historical_data,gl_desc=config.get("historical_data_filter_and_retrieval").get("apply_filter_on_this_fields").get("llm_callout"))
+            logger.info(f"Number of gl categories with historical data: {glcat_list_from_history}")
+             # ======================= CASE 0 =======================
+            if len(glcat_list) == 0:
+                try:
+                    # pass
+                    logger.info(f" No gl category found for {invl.get(input_data_field_mapping.get('invline_identifier'))}")
+                    invl["Flag"] = "direct_result"
+                    invl["result"] = {
+                        "Success": "False",
+                        "ID": invl.get(input_data_field_mapping.get('invline_identifier')),
+                        "GL Code": {"field_value": "NA", "confidence_score": 0},
+                        "Cost Code": {"field_value": "NA", "confidence_score": 0}
+                    }
+                    non_llm_lines.append(invl)
+                    continue
+                except Exception as e:
+                    logger.exception(f"Error in CASE 1 for invoice line {invl}")
+                    continue
+
+            # ======================= CASE 1: Only 1 GL Category =======================
+            elif len(glcat_list) == 1:
+                try:
+                    exact_matches = []
+                    for d in historical_data:
+                        if d.get(config.get("AzureAIConfig").get("searchable")[0]) == invl.get(input_data_field_mapping.get('line_desc')) or d.get("score") >=0.99:
+                            exact_matches.append(d)
+                            logger.info(f"{d.get(config.get("AzureAIConfig").get("searchable")[0])} === {invl.get(input_data_field_mapping.get('line_desc'))} or {d.get("score")}")
+                    
+                    if len(exact_matches) > 0:
+                        # Found exact matches - use direct_prediction
+                        logger.info(f"{invl.get(input_data_field_mapping.get('invline_identifier'))} has {len(exact_matches)} exact matches")
+                        
+                        # Rearrange exact matches by GL category
+                        exact_match_arranged = rearrange_historical_data(
+                            historical_data=exact_matches,
+                            gl_desc=config.get("historical_data_filter_and_retrieval").get("apply_filter_on_this_fields").get("llm_callout")
+                        )
+                        
+                        invl["Flag"] = "direct_prediction"
+                        invl["all_line_detail"] = exact_match_arranged
+                        non_llm_lines.append(invl)
+                        continue
+                    gl_category = glcat_list[0]
+                    historical_records = arranged_hist_data.get(gl_category, [])
+                    # del historical_data
+                    
+                    # Case 1a: Without historical data
+                    if len(historical_records) == 0:
+                        logger.info(f"{invoice_line_id}: Single GL category, no history")
+                        
+                        invl["low_confidence"]["present"] = "True"
+                        if gl_category in gldesc_to_glcode_mapping and len(gldesc_to_glcode_mapping[gl_category]) == 1:
+                            invl["Flag"] = "direct_result"
+                            invl["result"] = {
+                                "Success": "True",
+                                "ID": invoice_line_id,
+                                "GL Code": {"field_value": gldesc_to_glcode_mapping[gl_category][0], "confidence_score": 0},
+                                "Cost Code": {"field_value": "NA", "confidence_score": 0}
+                            }
+                        else:
+                            invl["Flag"] = "direct_result"
+                            invl["result"] = {
+                                "Success": "False",
+                                "ID": invoice_line_id,
+                                "GL Code": {"field_value": "NA", "confidence_score": 0},
+                                "Cost Code": {"field_value": "NA", "confidence_score": 0}
+                            }
+                        non_llm_lines.append(invl)
+                        continue
+                    
+                    # Case 1b: With historical data (same as old Case 3)
+                    else:
+                        logger.info(f"{invoice_line_id}: Single GL, with history")
+                        
+                        # Use historical data from historicalData field
+                        
+                        invl["Flag"] = "direct_prediction"
+                        invl["all_line_detail"] = arranged_hist_data
+                        non_llm_lines.append(invl)
+                        continue
+                except Exception as e:
+                    logger.exception(f"Error in CASE 1 for invoice line {invl}: {e}")
+                    continue
+            else:
+                try:
+                    countHistory = len(glcat_list_from_history)
+
+                    # CASE 2a - multiple gl categories with no historical data
+                    if countHistory==0:
+                        logger.info(f"{invl.get(input_data_field_mapping.get('invline_identifier'))}: Multiple GL Category, no history")
+                        invl["Flag"] = "direct_result"
+                        invl["result"] = {
+                            "Success": "False",
+                            "ID": invl.get(input_data_field_mapping.get('invline_identifier')),
+                            "GL Code": {"field_value": "NA", "confidence_score": 0},
+                            "Cost Code": {"field_value": "NA", "confidence_score": 0}
+                        }
+                        non_llm_lines.append(invl)
+                        continue
+                    # CASE 2b,c - multiple gl categories with only 1 glcat has historical data
+                    elif countHistory==1:
+                        logger.info(f"{invl.get(input_data_field_mapping.get('invline_identifier'))}: Multiple GL Category, only 1 historical line")
+                        # Collect all records from the GL category that has history
+                        
+                        invl["Flag"] = "direct_prediction"
+                        invl["all_line_detail"] = arranged_hist_data
+                        non_llm_lines.append(invl)
+                        continue
+                    # CASE 2d,e - multiple gl categories with multiple glcat having historical data
+                    else:
+                        logger.info(f"{invl.get(input_data_field_mapping.get('invline_identifier'))}: Multiple GL Category, multiple historical line")
+                        
+                        # ################ PERFECT MATCH ################
+                        # flag = 0
+                        # for d in historical_data:
+                        #     if d.get(config.get("AzureAIConfig").get("searchable")[0]) == invl.get(input_data_field_mapping.get('line_desc')) or d.get("score") >=0.99:
+                        #         invl["Flag"] = "direct_result"
+                        #         invl["result"] = {
+                        #             "Success": "True",
+                        #             "ID": invl.get(input_data_field_mapping.get('invline_identifier')),
+                        #             "GL Code": {"field_value": d.get(config.get("historical_data_filter_and_retrieval").get("GLCode_field_name_in_historical_data")), "confidence_score": 100}, # add GLCode in input_data_to_historical_data_field_mapping
+                        #             "Cost Code": {"field_value": "NA", "confidence_score": 0}
+                        #         }
+                        #         flag = 1
+                        #         break
+                        
+                        # if flag == 1:
+                        #     non_llm_lines.append(invl)
+                        #     continue
+                        # ################################################
+                        ################ PERFECT MATCH ################
+                        exact_matches = []
+                        for d in historical_data:
+                            if d.get(config.get("AzureAIConfig").get("searchable")[0]) == invl.get(input_data_field_mapping.get('line_desc')) or d.get("score") >=0.99:
+                                exact_matches.append(d)
+                                logger.info(f"{d.get(config.get("AzureAIConfig").get("searchable")[0])} === {invl.get(input_data_field_mapping.get('line_desc'))} or {d.get("score")}")
+                        
+                        if len(exact_matches) > 0:
+                            # Found exact matches - use direct_prediction
+                            logger.info(f"{invl.get(input_data_field_mapping.get('invline_identifier'))} has {len(exact_matches)} exact matches")
+                            
+                            # Rearrange exact matches by GL category
+                            exact_match_arranged = rearrange_historical_data(
+                                historical_data=exact_matches,
+                                gl_desc=config.get("historical_data_filter_and_retrieval").get("apply_filter_on_this_fields").get("llm_callout")
+                            )
+                            
+                            invl["Flag"] = "direct_prediction"
+                            invl["all_line_detail"] = exact_match_arranged
+                            non_llm_lines.append(invl)
+                            continue
+                        ################################################
+                        # No exact match found - prepare for LLM processing
+                        all_lines_for_llm_usecase.update({invl.get(input_data_field_mapping.get('invline_identifier')): historical_data})
+                        
+                        # Build historicallyMatchedLineDescriptions
+                        match_lin_desc = []
+                        for gl_cat, records in arranged_hist_data.items():
+                            if len(records) > 0:  # Only include categories with history
+                                match_lin_desc.append({
+                                    "glCategory": gl_cat,
+                                    "glCategoryExplanation": desc_to_explaination.get(gl_cat, "NA"),
+                                    "lineDescriptions": []
+                                })
+                        logger.info(f"Matched Line Description: {match_lin_desc}")
+                        # Populate line descriptions for each category
+                        for line in historical_data:
+                            temp_gldesc = line.get(config.get("historical_data_filter_and_retrieval").get("apply_filter_on_this_fields").get("llm_callout"))
+                            # logger.info(f"temp_gldesc: {temp_gldesc}")
+                            for dict1 in match_lin_desc:
+                                if dict1["glCategory"] == temp_gldesc:
+                                    dict1["lineDescriptions"].append({
+                                        "matchedLineDescription": line[config.get("AzureAIConfig").get("searchable")[0]],
+                                        "score": line["score"]
+                                    })
+                                    # break
+                        logger.info(f"Match Line description after adding lines: {match_lin_desc}")
+                        # Remove duplicates and sort by score within each category
+                        for ent in match_lin_desc:
+                            seen = set()
+                            unique_lines = []
+                            for line in ent.get("lineDescriptions", []):
+                                key = line.get("matchedLineDescription")
+                                if key and key not in seen:
+                                    seen.add(key)
+                                    unique_lines.append(line)
+                            ent["lineDescriptions"] = sorted(unique_lines, key=lambda x: x.get("score", 0), reverse=True)
+                        
+                        # Keep top N lines across all glCategories (global filtering)
+                        all_descs = []
+                        for ent in match_lin_desc:
+                            for line in ent.get("lineDescriptions", []):
+                                all_descs.append({
+                                    "glCategory": ent["glCategory"],
+                                    "matchedLineDescription": line["matchedLineDescription"],
+                                    "score": line["score"]
+                                })
+                        
+                        # Sort globally by score and keep top N
+                        top_n = config.get("historical_data_filter_and_retrieval").get("No_of_lineDescription_extract_from_historical_data", 100)
+                        top_descs = sorted(all_descs, key=lambda x: x["score"], reverse=True)[:top_n]
+                        total_lines = len(top_descs)
+                        
+                        # Rebuild match_lin_desc with only top N distributed back
+                        filtered_match_lin_desc = []
+                        for ent in match_lin_desc:
+                            filtered_lines = [
+                                {"matchedLineDescription": d["matchedLineDescription"], "score": d["score"]}
+                                for d in top_descs if d["glCategory"] == ent["glCategory"]
+                            ]
+                            if filtered_lines:  # Only include if there are lines after filtering
+                                ent["lineDescriptions"] = filtered_lines
+                                filtered_match_lin_desc.append(ent)
+                        
+                        match_lin_desc = filtered_match_lin_desc
+                        
+                        invl["historicallyMatchedLineDescriptions"] = match_lin_desc
+                        invl['totalLines'] = total_lines
+                        logger.info(f"For {invl.get(input_data_field_mapping.get('invline_identifier'))}, historicallyMatchedLineDescriptions created with {total_lines} lines")
+                        
+                        # Reverse mapping for LLM format
+                        reverse_mapping = {v: k for k, v in mapping.items() if v in invl}
+                        reversed_data = {reverse_mapping.get(k, k): v for k, v in invl.items()}
+                        llm_lines_only.append(reversed_data)
+                        continue
+
+                except Exception as e:
+                    logger.exception(f"Error in CASE 2 for invoice line {invl}: {e}")
+                    continue
+
+
+        # Prepare return data
+        input_data_llm["invoiceLineItems"] = llm_lines_only
+        if "historicalData" in invl:
+            del invl["historicalData"]
+            
+        return {
+            "status": "success",
+            "llm_data": input_data_llm,
+            "non_llm_lines": non_llm_lines,
+            "all_lines_for_llm_usecase": all_lines_for_llm_usecase
+        }
+        
+    except Exception as e:
+        logger.exception("Error in GLcat_to_lineDesc_without_filtering")
+        return {
+            "status": "error",
+            "message": f"Failed to process GL categories to line descriptions: {e}"
+        }
+
+
+# result=GLcat_to_lineDesc_without_filtering(input_data, [], {}, [], config)
+# print(result)
