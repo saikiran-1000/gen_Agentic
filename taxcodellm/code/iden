@@ -1,0 +1,177 @@
+"""Invoice Processing Module for GRN Variance Analysis.
+
+This module processes validated invoice data, calculates GRN variances, generates 
+AI-powered recommendations, and formats results for final output. It handles 
+business logic for variance analysis, historical data consolidation, and LLM integration.
+"""
+
+import json
+import logging
+import uuid
+import time
+from typing import Any, Dict, List, Tuple
+
+from llm_call import get_azure_openai_response
+from output_validation import llm_response_validation
+
+def _preprocess_historical_data(invoice_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Consolidates and deduplicates historical data within invoice line items.
+    
+    This function iterates through each line item and groups its historical records
+    by a unique combination of 'taxCode' and 'lineItemDescription'. 
+    It is idempotent, meaning it can be run multiple times safely.
+    
+    For each group, it:
+    1.  Retains one representative entry, ensuring 'taxCode' is preserved.
+    2.  Aggregates ALL 'invoiceDate' strings from matching entries into a flat list.
+    3.  Calculates 'repeatOccurances' based on the count of items in the group.
+    4.  Uses the first invoiceLineID encountered as the representative ID.
+        
+    Args:
+        invoice_data (Dict[str, Any]): The full invoice data dictionary.
+    
+    Returns:
+        Dict[str, Any]: The modified invoice data dictionary.
+    """
+    logging.info("Starting historical data consolidation...")
+    
+    for line_item in invoice_data.get("invoiceLineItems", []):
+        historical_data = line_item.get("historicalData", [])
+                
+        if not historical_data:
+            continue
+        
+        if historical_data and "repeatOccurances" in historical_data[0]:
+            logging.info(f"Line item {line_item.get('invoiceLineID')} appears to be already processed. Skipping.")
+            continue
+        grouped_history: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        
+        for entry in historical_data:
+            tax_code = str(entry.get("taxCode", ""))
+            desc = str(entry.get("lineItemDescription", ""))
+            invoice_date = entry.get("invoiceDate", "")
+            
+            if isinstance(invoice_date, list):
+                dates_to_add = []
+                for date_item in invoice_date:
+                    if isinstance(date_item, list):
+                        dates_to_add.extend(date_item)
+                    else:
+                        dates_to_add.append(str(date_item))
+            else:
+                dates_to_add = [str(invoice_date)]
+            
+            key = (tax_code, desc)
+            
+            if key not in grouped_history:
+                base_entry = entry.copy()
+                grouped_history[key] = {
+                    "entry": base_entry,
+                    "dates": dates_to_add
+                }
+            else:
+                grouped_history[key]["dates"].extend(dates_to_add)
+        
+        consolidated_list = []
+        for group_data in grouped_history.values():
+            final_entry = group_data["entry"]
+            all_dates = group_data["dates"]
+            
+            final_entry["repeatOccurances"] = len(all_dates)
+            
+            final_entry["invoiceDate"] = all_dates
+            
+            consolidated_list.append(final_entry)
+        
+        line_item["historicalData"] = consolidated_list
+        
+        logging.info(
+            f"Consolidated {len(historical_data)} items into {len(consolidated_list)} "
+            f"groups for line item {line_item.get('invoiceLineID')}."
+        )
+    
+    return invoice_data
+
+def identify_taxcode(invoice_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Identifies tax codes using an LLM with exponential backoff retry logic.
+
+    Args:
+        invoice_data (Dict[str, Any]): Validated invoice data.
+        config (Dict[str, Any]): Configuration dictionary.
+
+    Returns:
+        Dict[str, Any]: The LLM response dictionary.
+    """
+    invoice_id = invoice_data.get('invoiceID')
+    if not invoice_id:
+        invoice_id = str(uuid.uuid4())
+        logging.warning(f"Invoice ID missing. Assigned temporary UUID: {invoice_id}")
+    
+    logging.info(f"Starting batch tax code identification for Invoice ID: {invoice_id}")
+
+    if not invoice_data.get("invoiceLineItems"):
+        logging.warning(f"Invoice {invoice_id} has no line items.")
+        return {"invoiceID": invoice_id, "invoiceLineItemsResults": []}
+
+    try:
+        processed_data = _preprocess_historical_data(invoice_data)
+        invoice_data_json = json.dumps(processed_data, indent=2)
+
+        system_prompt = config.get("tax_coding_system_prompt")
+        user_prompt_template = config.get("tax_coding_user_prompt")
+
+        if not system_prompt or not user_prompt_template:
+            raise ValueError(f"##TAX-CODING-ERROR## System or user prompt missing from configuration.")
+
+        user_prompt = user_prompt_template.format(invoice_json=invoice_data_json)
+        logging.info(f"Prompts prepared for Invoice ID: {invoice_id}")
+
+        llm_content = None
+        last_exception = None
+
+        MAX_RETRIES = config.get("MAX_RETRIES", 3)
+        RETRY_BACKOFF_FACTOR = config.get("RETRY_BACKOFF_FACTOR", 2)
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                logging.info(f"LLM Request Attempt {attempt}/{MAX_RETRIES} for ID: {invoice_id}...")
+                
+                llm_content, _ = get_azure_openai_response(system_prompt, user_prompt)
+                break 
+
+            except (TimeoutError, ConnectionError, BlockingIOError) as e:
+                last_exception = e
+                if attempt < MAX_RETRIES:
+                    wait_time = RETRY_BACKOFF_FACTOR ** attempt
+                    logging.warning(f"Attempt {attempt} failed for ID {invoice_id}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logging.error(f"All {MAX_RETRIES} attempts failed for ID {invoice_id}.")
+            
+            except (ValueError, PermissionError) as e:
+                logging.error(f"Non-retriable LLM Error for ID {invoice_id}: {e}")
+                raise ValueError(f"##TAX-CODING-ERROR## LLM Logic Error: {str(e)}") from e
+
+        if not llm_content:
+            raise RuntimeError(f"##TAX-CODING-ERROR## LLM Service Unavailable. Last error: {str(last_exception)}")
+
+        try:
+            logging.info(f"Parsing LLM response for Invoice ID: {invoice_id}...")
+            llm_response_json = json.loads(llm_content)
+            
+            llm_response_validation(llm_response_json)
+
+            if llm_response_json.get("invoiceID") != invoice_id:
+                logging.warning(f"ID mismatch detected. Overwriting LLM ID with Input ID.")
+                llm_response_json["invoiceID"] = invoice_id
+
+            return llm_response_json
+
+        except json.JSONDecodeError as e:
+            raise ValueError(f"##TAX-CODING-ERROR## Failed to parse LLM JSON: {str(e)}") from e
+
+    except Exception as e:
+        if '##TAX-CODING-ERROR##' not in str(e):
+            raise ValueError(f"##TAX-CODING-ERROR## Processing Error: {str(e)}") from e
+        raise e
