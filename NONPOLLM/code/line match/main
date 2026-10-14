@@ -1,0 +1,62 @@
+"""Module for orchestrating Non-PO Invoice Coding workflow for Line Description Matching."""
+
+import logging
+from typing import Any, Dict
+# from dotenv import load_dotenv
+
+# from line_desc_match_input_validation import input_validation
+# from line_desc_match_process_invoice import process_invoice
+# from line_desc_match_output_validation import output_validation
+
+from line_description_matching.line_desc_match_input_validation import input_validation
+from line_description_matching.line_desc_match_process_invoice import process_invoice
+from line_description_matching.line_desc_match_output_validation import output_validation
+
+# load_dotenv()
+
+def line_desc_match_main(input_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Orchestrates the end-to-end Non-PO Invoice Coding workflow:
+    - Validates the input invoice data structure.
+    - Processes each invoice line item using an LLM to identify the single most relevant historic line description.
+    - Validates the final output structure.
+
+    Args:
+        input_data (Dict[str, Any]): Raw invoice data to be processed.
+        config (Dict[str, Any]): Configuration dictionary, including prompts and key mappings.
+
+    Returns:
+        Dict[str, Any]:
+            - On success: The fully processed and validated invoice data.
+            - On failure: An error dictionary containing 'error' and 'status' keys indicating the stage that failed.
+    """
+    logging.info("Processing input: %s", input_data)
+    try:
+        validated_data = input_validation(input_data, config)
+    except ValueError as e:
+        logging.error("Input validation error: %s", e)
+        return {
+            "error": str(e),
+            "status": "Input validation failed"
+        }
+
+    try:
+        processed_invoice = process_invoice(validated_data, config)
+    except ValueError as e:
+        logging.error("Invoice processing error: %s", e)
+        return {
+            "error": str(e),
+            "status": "Invoice processing failed"
+        }
+
+    try:
+        output_validation(processed_invoice)
+    except ValueError as e:
+        logging.error("Output validation error: %s", e)
+        return {
+            "error": str(e),
+            "status": "Output validation failed"
+        }
+
+    # return processed_invoice
+    return {"status": "success","status_code":200, "data": processed_invoice}
